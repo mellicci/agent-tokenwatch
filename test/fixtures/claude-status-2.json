@@ -1,0 +1,16 @@
+{
+  "session_id": "claude-session-1",
+  "model": { "id": "claude-test-model" },
+  "workspace": { "current_dir": "/private/example-project" },
+  "cost": { "total_cost_usd": 1.28 },
+  "context_window": {
+    "context_window_size": 200000,
+    "used_percentage": 44,
+    "current_usage": {
+      "input_tokens": 1200,
+      "cache_creation": { "ephemeral_5m_input_tokens": 300 },
+      "cache_read_input_tokens": 7000,
+      "output_tokens": 1000
+    }
+  }
+}

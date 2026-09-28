@@ -1,0 +1,103 @@
+{
+  "lastReviewed": "2026-09-24",
+  "platforms": [
+    "Linux",
+    "macOS",
+    "Windows",
+    "WSL"
+  ],
+  "ci": {
+    "workflow": "ci",
+    "matrix": "ubuntu-latest, macos-latest and windows-latest, each on Node 20, 22 and 24",
+    "lastGreen": "2026-09-18",
+    "lastGreenCommit": "5ca5ea0",
+    "where": "the private development repository",
+    "notRunningSince": "2026-09-21",
+    "why": "every run since has failed before any job started, with a GitHub billing and spending-limit annotation, so nothing merged after 2026-09-18 has been through CI on any operating system"
+  },
+  "notes": [
+    "CI runs Tokenwatch's own test suite and smoke test. It does not run Claude Code, Codex CLI or GitHub Copilot CLI, so it cannot show that an agent executes the commands Tokenwatch writes; only a hands-on run can.",
+    "A hands-on date covers the Tokenwatch build installed that day. A change dated later — the CHANGELOG entries still marked \"Needs a hands-on Windows test\" among them — is covered by the test suite, not by that run.",
+    "The hands-on Windows run of 2026-09-23 also ran the test suite: 151 of 156 passed. The five failures are fixed in the Unreleased section of the CHANGELOG and have not been re-run on Windows."
+  ],
+  "agents": [
+    {
+      "agent": "Claude Code",
+      "cells": {
+        "Linux": {
+          "level": "hands-on",
+          "version": "2.1.280 and 2.1.281",
+          "date": "2026-09-24",
+          "evidence": "The maintainer's machine, a Linux container, has recorded Claude Code status-line samples and hook events continuously since 2026-09-09; the newest, on 2026-09-24, came from sessions running Claude Code 2.1.280 and 2.1.281. Subagent counts were reconciled against Claude Code's own transcripts (`docs/publishing.md`). That machine ran the build from before the Unreleased changes dated 2026-09-24 (sandbox-safe reports, doctor's collection and status-line checks, install-location warnings)."
+        },
+        "macOS": {
+          "level": "ci-only",
+          "date": "2026-09-18",
+          "evidence": "The `ci` matrix ran the full suite and the smoke test on `macos-latest` for Node 20, 22 and 24, all passing on 2026-09-18. No hands-on run on a Mac is recorded for any agent."
+        },
+        "Windows": {
+          "level": "fixed-not-reverified",
+          "version": "not recorded",
+          "date": "2026-09-23",
+          "evidence": "Hands-on 2026-09-23: Tokenwatch installed cleanly, hooks fired and all six skills worked, but no tokens or cost were recorded (15 hook events, 0 turns) while `doctor` reported healthy. The project's own `.claude/settings.json` set another tool's status line, which outranks the user file Tokenwatch installs into. The first install also pointed every hook through a link into `%TEMP%`. Since then `doctor` names the status line that wins and warns about hooks without status-line samples, `install` warns about linked and temporary locations, and a byte-order mark no longer silences a hook. Since intent 04, `install --compose` runs the other status line beside Tokenwatch's instead of only diagnosing the collision, replaying it through Git Bash or PowerShell as Claude Code documents for Windows. Since intent 17, Tokenwatch's own Claude Code commands start `node` from PATH with double-quoted arguments, a form PowerShell runs as well as Git Bash, where before PowerShell (the shell Claude Code uses when Git Bash is absent) could not parse them; `doctor` runs each one through that shell. Since intent 16, a plain install composes by default, with up to four other lines, each replayed the same way. None of it has been re-run on Windows: see `INSTALL.md`, Troubleshooting."
+        },
+        "WSL": {
+          "level": "untested",
+          "evidence": "No run inside a WSL distribution is recorded for any agent. Under WSL Tokenwatch runs as Linux code, which the Linux CI leg covers. The Linux machine above is a container on a WSL2 kernel, not a WSL distribution used from Windows, so it does not exercise the split between the WSL and Windows home directories that `INSTALL.md` warns about."
+        }
+      }
+    },
+    {
+      "agent": "Codex CLI",
+      "cells": {
+        "Linux": {
+          "level": "provisional",
+          "version": "not recorded",
+          "date": "2026-09-17",
+          "evidence": "Smoke-tested, not field-tested. On 2026-09-17 a session started through `tokenwatch-codex` recorded token counts over OpenTelemetry and `notify` recorded turn boundaries; on 2026-09-18 host detection was checked by running `codex exec`; the Codex version was not recorded for either. On 2026-09-24, after a user-scope and after a project-scope install, the skill list codex-cli 0.154.0 gives its model (`codex debug prompt-input`) held all six skills. The recorded events have not been reconciled against Codex's own session logs, which `docs/publishing.md` requires before an adapter counts as field-tested. A session started as plain `codex` records no tokens (`docs/limitations.md`)."
+        },
+        "macOS": {
+          "level": "provisional",
+          "evidence": "The `ci` matrix ran the full suite and the smoke test on `macos-latest` for Node 20, 22 and 24, all passing on 2026-09-18. No hands-on run on a Mac is recorded for any agent."
+        },
+        "Windows": {
+          "level": "fixed-not-reverified",
+          "version": "not recorded",
+          "date": "2026-09-23",
+          "open": true,
+          "evidence": "Hands-on 2026-09-23, with Codex started as plain `codex`: no tokens were recorded (expected without `tokenwatch-codex`), no Codex events reached the ledger at all, reporting commands failed with `EPERM` inside Codex's sandbox, and the skills could not be found; the same day's test run showed the installer did not recognise its own `notify` relay. Fixed since: reporting commands work where the data directory is read-only, the relay is recognised by its parsed arguments, and the README, install output and skills give Codex's `$tw-...` syntax while `doctor` checks where Codex looks for skills. Still open: why no Codex events arrived at all, and whether the skill syntax was the whole skills problem. `doctor` now tells the causes apart (the relay failing, with its stage and error class; the relay never started; Codex not launched through `tokenwatch-codex`), and Codex's source shows it starts `notify` outside its sandbox (`docs/limitations.md`), but which cause applied there is unknown. Nothing has been re-run on Windows."
+        },
+        "WSL": {
+          "level": "untested",
+          "evidence": "No run inside a WSL distribution is recorded for any agent. Under WSL Tokenwatch runs as Linux code, which the Linux CI leg covers. The Linux machine above is a container on a WSL2 kernel, not a WSL distribution used from Windows, so it does not exercise the split between the WSL and Windows home directories that `INSTALL.md` warns about."
+        }
+      }
+    },
+    {
+      "agent": "GitHub Copilot CLI",
+      "cells": {
+        "Linux": {
+          "level": "hands-on",
+          "version": "1.0.85",
+          "date": "2026-09-17",
+          "evidence": "On 2026-09-17 a live GitHub Copilot CLI 1.0.85 session delivered status-line renders and hook events, and the per-call token delta derived from its cumulative counters matched the `last_call_*` figures Copilot reports separately; the captured payloads are the 1.0.85 fixtures in `test/fixtures`. The recorded data was checked again on 2026-09-21. Hook entries have since become a `bash` and `powershell` pair and `preToolUse` is no longer registered (Unreleased, 2026-09-24); no real Copilot has run that form yet."
+        },
+        "macOS": {
+          "level": "ci-only",
+          "date": "2026-09-18",
+          "evidence": "The `ci` matrix ran the full suite and the smoke test on `macos-latest` for Node 20, 22 and 24, all passing on 2026-09-18. No hands-on run on a Mac is recorded for any agent."
+        },
+        "Windows": {
+          "level": "fixed-not-reverified",
+          "version": "not recorded",
+          "date": "2026-09-23",
+          "evidence": "Hands-on 2026-09-23: Copilot denied every tool call (`Denied by preToolUse hook ... (hook errored)`), because PowerShell could not parse Tokenwatch's hook command and `preToolUse` fails closed; the status line showed `no local usage yet`; the first install pointed every hook through a link into `%TEMP%`. Fixed since: no `preToolUse` hook, a PowerShell rendering of every hook, the status line kept in the form cmd.exe runs, `doctor` executing each installed command, and install-location warnings. None of it has been re-run on Windows."
+        },
+        "WSL": {
+          "level": "untested",
+          "evidence": "No run inside a WSL distribution is recorded for any agent. Under WSL Tokenwatch runs as Linux code, which the Linux CI leg covers. The Linux machine above is a container on a WSL2 kernel, not a WSL distribution used from Windows, so it does not exercise the split between the WSL and Windows home directories that `INSTALL.md` warns about."
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+# Windows CI (actions/checkout on windows-latest) defaults to core.autocrlf=true
+# and converts every text file to CRLF on checkout. Several tests and, more
+# importantly, any future one that regex-matches a checked-out doc or skill file
+# assuming bare \n will silently break only on Windows - which is exactly what
+# happened here, undetected, until CI was checked directly. Force LF on checkout
+# for every text format this repo actually has, so a Windows checkout is
+# byte-for-byte the same as a Linux or macOS one and there is nothing left for a
+# platform-specific line ending to break.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary

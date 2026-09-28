@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # There are no runtime or dev dependencies to bump. This keeps the workflow
+  # actions current, which is where this repository's supply-chain risk lives.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly

@@ -1,0 +1,31 @@
+{
+  "mapping_id": "claude-jsonl-1",
+  "mapping_version": "1.0",
+  "agent": "claude",
+  "evidence": {
+    "agent_version": "2.1.282",
+    "probed_on": "2026-09-25",
+    "note": "One line per assistant message part; the parts of one response share message.id and the last carries its final usage."
+  },
+  "file": { "glob": "**/*.jsonl", "line_format": "jsonl" },
+  "record": {
+    "select": [{ "path": "type", "equals": "assistant" }],
+    "ts": "timestamp",
+    "session_id": "sessionId",
+    "response_id": "message.id",
+    "model": "message.model",
+    "project_path": "cwd",
+    "usage": {
+      "input_fresh": { "path": "message.usage.input_tokens" },
+      "cache_read": { "path": "message.usage.cache_read_input_tokens" },
+      "cache_write": { "path": "message.usage.cache_creation_input_tokens" },
+      "cache_write_5m": { "path": "message.usage.cache_creation.ephemeral_5m_input_tokens" },
+      "cache_write_1h": { "path": "message.usage.cache_creation.ephemeral_1h_input_tokens" },
+      "output": { "path": "message.usage.output_tokens" }
+    }
+  },
+  "semantics": "components",
+  "usage_mode": "per_call",
+  "authority": "per_call",
+  "overlap": { "compare": "last_call_per_turn" }
+}

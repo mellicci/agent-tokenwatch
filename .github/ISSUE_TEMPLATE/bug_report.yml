@@ -1,0 +1,52 @@
+name: Bug report
+description: Something behaves differently than documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not paste prompts, source code, transcripts, file paths, or raw
+        hook payloads.** Tokenwatch is a privacy tool; an issue about it should
+        not become the leak. `tokenwatch doctor` output is safe to share.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. tokenwatch install --agents claude --scope user
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: tokenwatch doctor
+      description: Paste the output. It lists paths and integration state, not telemetry.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `tokenwatch version`
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Linux, macOS, Windows, WSL]
+    validations:
+      required: true
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Which agent
+      multiple: true
+      options: [Claude Code, Codex CLI, GitHub Copilot CLI, Not agent-specific]

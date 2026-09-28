@@ -1,0 +1,47 @@
+{
+  "mapping_id": "copilot-events-1",
+  "mapping_version": "1.0",
+  "agent": "copilot",
+  "evidence": {
+    "agent_version": "1.0.86",
+    "probed_on": "2026-09-25",
+    "note": "session.shutdown carries the session's running totals (fresh input, cache read, cache write, output, AI units, premium requests), rising across resumes; its last one is the session. model.model_call_success covers only some requests, so it is read only to report the difference."
+  },
+  "file": { "glob": "**/events.jsonl", "line_format": "jsonl" },
+  "context": [
+    { "select": [{ "path": "type", "equals": "session.start" }], "session_id": "data.sessionId", "project_path": "data.context.cwd" }
+  ],
+  "record": {
+    "select": [{ "path": "type", "equals": "model.model_call_success" }],
+    "ts": "timestamp",
+    "response_id": "data.responseChunk.id",
+    "model": "data.modelCall.model",
+    "usage": {
+      "input_total": { "path": "data.responseChunk.usage.prompt_tokens" },
+      "cache_read": { "path": "data.responseChunk.usage.prompt_tokens_details.cached_tokens" },
+      "cache_write": { "path": "data.responseChunk.usage.prompt_tokens_details.cache_write_tokens" },
+      "output": { "path": "data.responseChunk.usage.completion_tokens" },
+      "reasoning": { "path": "data.responseChunk.usage.completion_tokens_details.reasoning_tokens" }
+    },
+    "billing": { "aiu": { "path": "data.copilotUsage.total_nano_aiu", "scale": 1e-9 } }
+  },
+  "summary": {
+    "select": [{ "path": "type", "equals": "session.shutdown" }],
+    "ts": "timestamp",
+    "model": "data.currentModel",
+    "usage": {
+      "input_fresh": { "path": "data.tokenDetails.input.tokenCount" },
+      "cache_read": { "path": "data.tokenDetails.cache_read.tokenCount" },
+      "cache_write": { "path": "data.tokenDetails.cache_write.tokenCount" },
+      "output": { "path": "data.tokenDetails.output.tokenCount" }
+    },
+    "billing": {
+      "aiu": { "path": "data.totalNanoAiu", "scale": 1e-9 },
+      "premium_requests": { "path": "data.totalPremiumRequests" }
+    }
+  },
+  "semantics": "components",
+  "usage_mode": "per_call",
+  "authority": "summary",
+  "overlap": { "compare": "session_sum" }
+}

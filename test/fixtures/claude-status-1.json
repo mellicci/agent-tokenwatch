@@ -1,0 +1,19 @@
+{
+  "session_id": "claude-session-1",
+  "model": { "id": "claude-test-model", "display_name": "Test model" },
+  "workspace": { "current_dir": "/private/example-project" },
+  "cost": { "total_cost_usd": 1.25, "total_duration_ms": 12000 },
+  "context_window": {
+    "context_window_size": 200000,
+    "used_percentage": 41,
+    "current_usage": {
+      "input_tokens": 1000,
+      "cache_creation_input_tokens": 500,
+      "cache_read_input_tokens": 6500,
+      "output_tokens": 900,
+      "thinking_tokens": 200
+    }
+  },
+  "prompt": "THIS MUST NEVER BE STORED",
+  "transcript_path": "/private/transcript.jsonl"
+}

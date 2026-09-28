@@ -1,0 +1,12 @@
+node_modules/
+*.tgz
+*.zip
+coverage/
+.DS_Store
+Thumbs.db
+TEST-REPORT.txt
+VALIDATION.md
+
+# Installed output of `tokenwatch install --scope project`: machine-specific
+# absolute paths and copies of skills/ that go stale.
+.claude/

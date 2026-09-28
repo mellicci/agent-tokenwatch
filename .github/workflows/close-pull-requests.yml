@@ -1,0 +1,39 @@
+name: close-pull-requests
+
+# This repository does not accept pull requests (see CONTRIBUTING.md). Rather
+# than leave one open with no answer, thank the author, point them at issues,
+# and close it.
+#
+# `pull_request_target` is required to write to a pull request opened from a
+# fork. It is safe here because this job never checks out, builds, or runs
+# anything from the pull request: it reads the PR number and author from the
+# event and calls the API. Nothing from the PR's title or body reaches a shell.
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions: {}
+
+jobs:
+  close:
+    # The maintainer's own pull requests and Dependabot's action updates stay open.
+    if: >-
+      !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+      && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      # A pull request comment goes through the issues API.
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Thank the author, point to issues, and close
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr close "$PR" --comment "Thank you for taking the time to put this together.
+
+          This project is maintained by one person on a best-effort basis and does not accept pull requests, so this one is being closed without review. That is about capacity, not about your work.
+
+          If it fixes a bug or adds something useful, please open an issue describing it: https://github.com/${GH_REPO}/issues/new/choose. A good idea may be implemented independently and credited in the changelog. See CONTRIBUTING.md for details."

@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "dataFile": "~/.local/state/tokenwatch/events.jsonl",
+  "stateFile": "~/.local/state/tokenwatch/state.json",
+  "installStateFile": "~/.local/state/tokenwatch/install-state.json",
+  "experimentsFile": "~/.local/state/tokenwatch/experiments.jsonl",
+  "pricingFile": "~/.config/tokenwatch/pricing.json",
+  "cacheTtlSeconds": 300,
+  "averagingWindow": 10,
+  "retentionDays": 90,
+  "status": {
+    "maxWidth": 120,
+    "layout": "multi",
+    "align": true,
+    "color": true,
+    "icons": true,
+    "showCost": true,
+    "showSession": true,
+    "showTokens": true,
+    "showCache": true,
+    "showContext": true,
+    "showSubagents": true
+  },
+  "privacy": {
+    "projectIdentity": "hmac-sha256",
+    "storeToolNames": false,
+    "storeModelNames": true,
+    "storeDurations": true
+  },
+  "codex": {
+    "command": "codex",
+    "otlpHost": "127.0.0.1",
+    "otlpPort": 4318,
+    "otlpPath": "/v1/logs",
+    "installOtelConfig": true
+  },
+  "paths": {}
+}

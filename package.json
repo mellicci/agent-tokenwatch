@@ -1,0 +1,57 @@
+{
+  "name": "agent-tokenwatch",
+  "version": "0.1.0",
+  "description": "Local, metadata-only token and cost telemetry for Claude Code, Codex CLI, and GitHub Copilot CLI.",
+  "type": "module",
+  "bin": {
+    "tokenwatch": "./bin/tokenwatch.mjs",
+    "tokenwatch-codex": "./bin/tokenwatch-codex.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "skills",
+    "docs",
+    "examples",
+    "README.md",
+    "INSTALL.md",
+    "LICENSE",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "test:coverage": "node --test --experimental-test-coverage",
+    "smoke": "node ./scripts/smoke.mjs",
+    "check": "node --check ./bin/tokenwatch.mjs && node --check ./src/cli.mjs && node --check ./examples/statusline-wrapper.mjs && npm test && npm run smoke",
+    "pack:check": "npm pack --dry-run",
+    "pack:portable": "node ./scripts/package-portable.mjs",
+    "audit": "npm audit --audit-level=high"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "github-copilot",
+    "tokens",
+    "prompt-cache",
+    "telemetry",
+    "cost"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mellicci/agent-tokenwatch.git"
+  },
+  "homepage": "https://github.com/mellicci/agent-tokenwatch#readme",
+  "bugs": {
+    "url": "https://github.com/mellicci/agent-tokenwatch/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

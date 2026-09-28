@@ -1,0 +1,8 @@
+{
+  "type": "agent-turn-complete",
+  "thread-id": "codex-thread-1",
+  "turn-id": "codex-turn-2",
+  "cwd": "/private/codex-project",
+  "input-messages": ["SECRET USER TEXT", "MORE SECRET TEXT"],
+  "last-assistant-message": "SECRET ASSISTANT TEXT"
+}

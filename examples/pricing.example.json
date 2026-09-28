@@ -1,0 +1,31 @@
+{
+  "version": "replace-with-date-reviewed",
+  "models": [
+    {
+      "agent": "claude-code",
+      "match": "replace-with-model-id-*",
+      "input_per_million": 0,
+      "cache_read_per_million": 0,
+      "cache_write_5m_per_million": 0,
+      "cache_write_1h_per_million": 0,
+      "output_per_million": 0,
+      "reasoning_per_million": 0
+    },
+    {
+      "agent": "codex-cli",
+      "match": "replace-with-model-id-*",
+      "input_per_million": 0,
+      "cache_read_per_million": 0,
+      "output_per_million": 0,
+      "reasoning_per_million": 0
+    },
+    {
+      "agent": "github-copilot-cli",
+      "match": "replace-with-model-id-*",
+      "input_per_million": 0,
+      "cache_read_per_million": 0,
+      "output_per_million": 0,
+      "reasoning_per_million": 0
+    }
+  ]
+}

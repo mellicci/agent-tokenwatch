@@ -1,0 +1,33 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "codex" } },
+          { "key": "conversation_id", "value": { "stringValue": "otlp-session" } },
+          { "key": "cwd", "value": { "stringValue": "/private/otlp-project" } }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": { "name": "codex.telemetry" },
+          "logRecords": [
+            {
+              "timeUnixNano": "1787400000000000000",
+              "traceId": "trace-1",
+              "spanId": "span-1",
+              "body": {
+                "stringValue": "{\"event.name\":\"codex.api_request\",\"input_token_count\":9000,\"cached_input_token_count\":6000,\"output_token_count\":800,\"reasoning_token_count\":100,\"model\":\"gpt-test\",\"prompt\":\"SECRET BODY\"}"
+              },
+              "attributes": [
+                { "key": "turn_id", "value": { "stringValue": "otlp-turn" } },
+                { "key": "cost_usd", "value": { "doubleValue": 0.04 } },
+                { "key": "arbitrary.text", "value": { "stringValue": "SECRET ATTRIBUTE" } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

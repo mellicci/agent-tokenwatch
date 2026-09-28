@@ -1,0 +1,43 @@
+{
+  "cwd": "/private/workspace/project",
+  "session_id": "copilot-session-9",
+  "session_name": "SECRET SESSION TITLE",
+  "transcript_path": "/private/workspace/project/.copilot/transcript.json",
+  "model": { "id": "claude-sonnet-4.5", "display_name": "Sonnet 4.5", "auto_tier": null, "pending_auto_tier": null },
+  "workspace": { "current_dir": "/private/workspace/project" },
+  "username": "someone",
+  "remote": { "connected": false },
+  "version": "1.0.85",
+  "cost": {
+    "total_api_duration_ms": 41230,
+    "total_lines_added": 220,
+    "total_lines_removed": 31,
+    "total_duration_ms": 98000,
+    "total_premium_requests": 4
+  },
+  "context_window": {
+    "total_input_tokens": 512000,
+    "total_output_tokens": 9100,
+    "total_cache_read_tokens": 480000,
+    "total_cache_write_tokens": 21000,
+    "total_reasoning_tokens": 0,
+    "total_tokens": 521100,
+    "context_window_size": 200000,
+    "used_percentage": 34,
+    "remaining_percentage": 66,
+    "remaining_tokens": 132000,
+    "last_call_input_tokens": 68000,
+    "last_call_output_tokens": 640,
+    "current_context_tokens": 68000,
+    "displayed_context_limit": 200000,
+    "current_context_used_percentage": 34,
+    "current_usage": {
+      "input_tokens": 68000,
+      "output_tokens": 640,
+      "cache_creation_input_tokens": 1500,
+      "cache_read_input_tokens": 64000
+    }
+  },
+  "ai_used": { "total_nano_aiu": 42500000, "formatted": "0.0425" },
+  "allow_all_enabled": false
+}

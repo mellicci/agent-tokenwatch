@@ -1,0 +1,64 @@
+name: publish
+
+# Publishing is driven by a tag, so what reaches npm is always a commit that
+# exists in this repository's history.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Cheapest check first: a tag that disagrees with package.json fails in
+  # seconds instead of after the whole test matrix.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Refuse to publish a tag that disagrees with package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag $tag does not match package.json $pkg" >&2
+            exit 1
+          fi
+
+  # The full ci.yml matrix - ubuntu, macOS and Windows on Node 20, 22 and 24 -
+  # run against the tagged commit. Publishing used to re-run the tests on one
+  # platform only, so a tag on a commit that failed on Windows would still have
+  # shipped.
+  test:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for npm provenance: npmjs.com then shows a verified badge
+      # attesting the tarball was built from this repo at this commit.
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - run: npm ci --ignore-scripts
+      # npm 11.5.1+ authenticates over OIDC when the package has trusted
+      # publishing configured on npmjs.com, using the short-lived token minted
+      # by `id-token: write` above. That deletes the long-lived credential
+      # entirely, which matters more here than provenance does: a compromised
+      # job produces a perfectly valid attestation for a malicious tarball, so
+      # provenance proves where a build ran, not that it should have.
+      #
+      # Configure it once at https://www.npmjs.com/package/agent-tokenwatch/access
+      # before the first tag, choosing this repository and this workflow file.
+      # Until that is done the publish step will fail to authenticate, which is
+      # the right failure: it does not silently fall back to a stored secret.
+      - run: npm install -g npm@latest
+      - run: npm publish --provenance --access public

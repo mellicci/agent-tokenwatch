@@ -1,0 +1,15 @@
+{
+  "sessionId": "copilot-session-1",
+  "turnId": "turn-7",
+  "model": { "name": "copilot-test-model" },
+  "cwd": "C:\\private\\project",
+  "usage": {
+    "inputTokens": 5000,
+    "cachedInputTokens": 3000,
+    "outputTokens": 400,
+    "reasoningTokens": 50,
+    "costUsd": 0.02
+  },
+  "context": { "usedTokens": 40000, "limitTokens": 100000 },
+  "toolOutput": "SECRET TOOL CONTENT"
+}

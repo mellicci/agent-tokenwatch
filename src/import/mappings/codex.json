@@ -1,0 +1,43 @@
+{
+  "mapping_id": "codex-rollout-1",
+  "mapping_version": "1.0",
+  "agent": "codex",
+  "evidence": {
+    "agent_version": "0.154.0",
+    "probed_on": "2026-09-25",
+    "note": "One token_usage_record per response; session_meta names the session and project, turn_context the model. The token_count running totals are read only as a self-check."
+  },
+  "file": { "glob": "**/rollout-*.jsonl", "line_format": "jsonl" },
+  "context": [
+    { "select": [{ "path": "type", "equals": "session_meta" }], "session_id": "payload.id", "project_path": "payload.cwd" },
+    { "select": [{ "path": "type", "equals": "turn_context" }], "model": "payload.model" }
+  ],
+  "record": {
+    "select": [{ "path": "type", "equals": "token_usage_record" }],
+    "ts": "timestamp",
+    "session_id": "payload.session_id",
+    "response_id": "payload.response_id",
+    "usage": {
+      "input_total": { "path": "payload.usage.input_tokens" },
+      "cache_read": { "path": "payload.usage.cached_input_tokens" },
+      "cache_write": { "path": "payload.usage.cache_write_input_tokens" },
+      "output": { "path": "payload.usage.output_tokens" },
+      "reasoning": { "path": "payload.usage.reasoning_output_tokens" }
+    }
+  },
+  "summary": {
+    "select": [{ "path": "type", "equals": "event_msg" }, { "path": "payload.type", "equals": "token_count" }],
+    "ts": "timestamp",
+    "usage": {
+      "input_total": { "path": "payload.info.total_token_usage.input_tokens" },
+      "cache_read": { "path": "payload.info.total_token_usage.cached_input_tokens" },
+      "cache_write": { "path": "payload.info.total_token_usage.cache_write_input_tokens" },
+      "output": { "path": "payload.info.total_token_usage.output_tokens" },
+      "reasoning": { "path": "payload.info.total_token_usage.reasoning_output_tokens" }
+    }
+  },
+  "semantics": "cached_subset",
+  "usage_mode": "per_call",
+  "authority": "per_call",
+  "overlap": { "compare": "session_sum" }
+}

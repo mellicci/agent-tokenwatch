@@ -1,0 +1,39 @@
+{
+  "mapping_id": "replace-with-agent-era-1",
+  "mapping_version": "1.0",
+  "agent": "claude",
+  "evidence": {
+    "agent_version": "0.0.0-replace-me",
+    "probed_on": "2026-01-01",
+    "note": "Where each value was found, from `tokenwatch import <agent> --check`: key paths and types only."
+  },
+  "file": { "glob": "**/replace-with-file-name-*.jsonl", "line_format": "jsonl" },
+  "context": [
+    {
+      "select": [{ "path": "replace.with.type.path", "equals": "replace-with-header-type" }],
+      "session_id": "replace.with.session.id.path",
+      "model": "replace.with.model.path",
+      "project_path": "replace.with.working.directory.path"
+    }
+  ],
+  "record": {
+    "select": [{ "path": "replace.with.type.path", "equals": "replace-with-response-type" }],
+    "ts": "replace.with.timestamp.path",
+    "session_id": "replace.with.session.id.path",
+    "response_id": "replace.with.response.id.path",
+    "model": "replace.with.model.path",
+    "usage": {
+      "input_total": { "path": "replace.with.input.tokens.path" },
+      "cache_read": { "path": "replace.with.cache.read.tokens.path" },
+      "cache_write": { "path": "replace.with.cache.write.tokens.path" },
+      "output": { "path": "replace.with.output.tokens.path" }
+    },
+    "billing": {
+      "aiu": { "path": "replace.with.nano.units.path", "scale": 1e-9 }
+    }
+  },
+  "semantics": "cached_subset",
+  "usage_mode": "per_call",
+  "authority": "per_call",
+  "overlap": { "compare": "session_sum" }
+}

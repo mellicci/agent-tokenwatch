@@ -1,0 +1,49 @@
+{
+  "cwd": "/private/workspace/project",
+  "session_id": "copilot-cumulative-session",
+  "session_name": "SECRET SESSION TITLE",
+  "transcript_path": "/home/example/.copilot/session-state/copilot-cumulative-session",
+  "model": {
+    "id": "auto",
+    "display_name": "Auto \u2192 gpt-5.6-luna",
+    "auto_tier": null,
+    "pending_auto_tier": null
+  },
+  "workspace": {
+    "current_dir": "/private/workspace/project"
+  },
+  "username": null,
+  "remote": {
+    "connected": false
+  },
+  "version": "1.0.85",
+  "cost": {
+    "total_api_duration_ms": 202407,
+    "total_lines_added": 94,
+    "total_lines_removed": 25,
+    "total_duration_ms": 3113657,
+    "total_premium_requests": 9
+  },
+  "context_window": {
+    "context_window_size": null,
+    "used_percentage": null,
+    "remaining_percentage": null,
+    "remaining_tokens": null,
+    "total_input_tokens": 4022450,
+    "total_output_tokens": 15107,
+    "total_cache_read_tokens": 3703850,
+    "total_cache_write_tokens": 318438,
+    "total_reasoning_tokens": 4052,
+    "total_tokens": 4037557,
+    "last_call_input_tokens": 118301,
+    "last_call_output_tokens": 34,
+    "current_context_tokens": 121875,
+    "displayed_context_limit": 200000,
+    "current_context_used_percentage": 61
+  },
+  "ai_used": {
+    "total_nano_aiu": 17184730000,
+    "formatted": "17.18"
+  },
+  "allow_all_enabled": false
+}
