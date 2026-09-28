@@ -83,13 +83,13 @@ export function renderSupportMatrix(data) {
     lines.push(`| ${row.agent} | ${data.platforms.map((platform) => cellText(row.cells[platform], ci)).join(' | ')} |`);
   }
   lines.push('',
-    `**CI.** The \`${ci.workflow}\` workflow runs on ${ci.matrix}. It last passed on ${ci.lastGreen} (commit \`${ci.lastGreenCommit}\`, in ${ci.where}). `
+    `**CI.** The \`${ci.workflow}\` workflow runs on ${ci.matrix}. It last passed on ${ci.lastGreen} (commit \`${ci.lastGreenCommit}\`${ci.where ? `, in ${ci.where}` : ''}). `
       + (ci.notRunningSince ? `It has not run since ${ci.notRunningSince}: ${ci.why}.` : (ci.latest ?? '')),
     '');
   for (const note of data.notes) lines.push(`- ${note}`);
-  lines.push('', '**Evidence per cell:**', '');
+  lines.push('', '<details>', '<summary>Evidence for each cell</summary>', '');
   for (const group of evidenceGroups(data)) lines.push(`- **${listOf(group.cells)}.** ${group.text}`);
-  lines.push('', SUPPORT_MATRIX_END);
+  lines.push('', '</details>', '', SUPPORT_MATRIX_END);
   return lines.join('\n');
 }
 

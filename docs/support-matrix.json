@@ -9,14 +9,13 @@
   "ci": {
     "workflow": "ci",
     "matrix": "ubuntu-latest, macos-latest and windows-latest, each on Node 20, 22 and 24",
-    "lastGreen": "2026-09-18",
-    "lastGreenCommit": "5ca5ea0",
-    "where": "the private development repository",
-    "latest": "On 2026-09-28 the matrix ran again: Linux and macOS passed, Windows failed 32 tests. All 32 are fixed since (31 in the tests, which assumed POSIX paths, shells or case; one in how a timed-out composed status line is stopped on Windows) and pass on windows-latest, but the full matrix has not been re-run on them."
+    "lastGreen": "2026-09-28",
+    "lastGreenCommit": "ceb070d",
+    "latest": "All nine jobs passed, the first green Windows run since the fixes from both Windows live tests."
   },
   "notes": [
     "CI runs Tokenwatch's own test suite and smoke test. It does not run Claude Code, Codex CLI or GitHub Copilot CLI, so it cannot show that an agent executes the commands Tokenwatch writes; only a hands-on run can.",
-    "A hands-on date covers the Tokenwatch build installed that day. A change dated later — the CHANGELOG entries still marked \"Needs a hands-on Windows test\" among them — is covered by the test suite, not by that run.",
+    "A hands-on date covers the Tokenwatch build installed that day; later changes are covered by the test suite, not by that run.",
     "Not live-tested for this release: Codex CLI on any operating system (its cells record older smoke tests and the 2026-09-23 Windows failure), and any agent on macOS, where only the test suite has run."
   ],
   "agents": [
@@ -31,8 +30,8 @@
         },
         "macOS": {
           "level": "ci-only",
-          "date": "2026-09-18",
-          "evidence": "The `ci` matrix ran the full suite and the smoke test on `macos-latest` for Node 20, 22 and 24, all passing on 2026-09-18. No hands-on run on a Mac is recorded for any agent."
+          "date": "2026-09-28",
+          "evidence": "The `ci` matrix ran the full suite and the smoke test on `macos-latest` for Node 20, 22 and 24, all passing on 2026-09-28. No hands-on run on a Mac is recorded for any agent."
         },
         "Windows": {
           "level": "fixed-not-reverified",
@@ -58,7 +57,7 @@
         },
         "macOS": {
           "level": "provisional",
-          "evidence": "The `ci` matrix ran the full suite and the smoke test on `macos-latest` for Node 20, 22 and 24, all passing on 2026-09-18. No hands-on run on a Mac is recorded for any agent."
+          "evidence": "The `ci` matrix ran the full suite and the smoke test on `macos-latest` for Node 20, 22 and 24, all passing on 2026-09-28. No hands-on run on a Mac is recorded for any agent."
         },
         "Windows": {
           "level": "fixed-not-reverified",
@@ -84,8 +83,8 @@
         },
         "macOS": {
           "level": "ci-only",
-          "date": "2026-09-18",
-          "evidence": "The `ci` matrix ran the full suite and the smoke test on `macos-latest` for Node 20, 22 and 24, all passing on 2026-09-18. No hands-on run on a Mac is recorded for any agent."
+          "date": "2026-09-28",
+          "evidence": "The `ci` matrix ran the full suite and the smoke test on `macos-latest` for Node 20, 22 and 24, all passing on 2026-09-28. No hands-on run on a Mac is recorded for any agent."
         },
         "Windows": {
           "level": "provisional",

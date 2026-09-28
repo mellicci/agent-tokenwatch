@@ -337,7 +337,7 @@ that boundary — Tokenwatch's own output versus how another vendor's CLI consum
 it — is the first place to look, and worth a bug report either way.
 What has been checked by hand, on which platform, with which agent version and
 when, is in the README's
-[Platform and agent support](README.md#platform-and-agent-support) table. The
+[Platform and agent support](README.md#supported-agents-and-platforms) table. The
 first hands-on Windows run was on 2026-09-23; the fixes it led to have not yet
 been re-run on Windows, and CI has not run since 2026-09-21.
 
