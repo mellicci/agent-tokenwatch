@@ -816,12 +816,83 @@ function copilotHookShell(env, platform = process.platform) {
   if (platform === 'win32') {
     for (const name of ['pwsh', 'powershell']) {
       const file = findOnPath(name, env, platform);
-      if (file) return { name, file, argsFor: (script) => ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')] };
+      if (file) return { name, kind: 'powershell', file, argsFor: (script) => ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')] };
     }
     return { name: 'PowerShell (pwsh or powershell)' };
   }
   const file = findOnPath('bash', env, platform);
-  return file ? { name: 'bash', file, argsFor: (script) => ['-c', script] } : { name: 'bash' };
+  return file ? { name: 'bash', kind: 'bash', file, argsFor: (script) => ['-c', script] } : { name: 'bash' };
+}
+
+// Copilot starts a shell per hook; doctor starts one for all of them, because a
+// shell per hook was ten PowerShell starts, about 9 s of a 16 s doctor on
+// windows-latest. One script is not ten shells, though: joined as plain lines,
+// a hook that exited ended the script for the hooks after it, one that did not
+// parse took the rest of the script with it, and one that hung was measured
+// against the sum of every hook's limit. So each hook is wrapped. The script
+// prints a line before it and, after it, its exit code, the errors PowerShell
+// recorded while it ran and the time it took; it is parsed only when it runs
+// (`eval` in Bash, `[ScriptBlock]::Create` in PowerShell), in Bash inside a
+// subshell of its own, and PowerShell's probe variable is set again before
+// each. A hook counts as healthy here only if it printed its own probe marker
+// between those two lines, exited 0 with no error, and finished inside its own
+// limit, counting the shell's start as Copilot's own shell would. Anything
+// else - a hook that failed, one that ended the script, the hooks the script
+// never reached, a script that did not parse or timed out - is decided by
+// running that hook alone, in a shell of its own under its own limit, exactly
+// as doctor did before it batched them.
+//
+// The script is one command-line argument, base64 UTF-16 for PowerShell, and a
+// Windows command line holds 32,767 characters: past this, no batch is tried.
+const HOOK_BATCH_ARGUMENT_LIMIT = 30_000;
+
+function copilotHookBatchScript(kind, hooks, tag) {
+  if (kind === 'powershell') {
+    const literal = (text) => `'${text.replace(/['‘’‚‛]/g, '$&$&')}'`;
+    return [
+      `"${tag} s $([long]([DateTime]::Now - [Diagnostics.Process]::GetCurrentProcess().StartTime).TotalMilliseconds)"`,
+      `function __tw($i, $s) { "${tag} b $i"; $env:${PROBE_ENV} = '1'; $global:LASTEXITCODE = 0; $e = $global:Error.Count; $f = 0; $w = [Diagnostics.Stopwatch]::StartNew(); try { & ([ScriptBlock]::Create($s)) } catch { $f = 1 }; "${tag} e $i $global:LASTEXITCODE $($global:Error.Count - $e + $f) $($w.ElapsedMilliseconds) 1" }`,
+      ...hooks.map((hook, index) => `__tw ${index} ${literal(hook.script)}`)
+    ].join('\n');
+  }
+  const literal = (text) => `'${text.replaceAll("'", `'\\''`)}'`;
+  return [
+    `printf '%s\\n' '${tag} s 0'`,
+    `__tw() { local r t1 t0="\${EPOCHREALTIME:-}" s0=$SECONDS; printf '%s\\n' "${tag} b $1"; ( __tw_s=$2; set --; eval "$__tw_s" ); r=$?; t1="\${EPOCHREALTIME:-}"; if [ -n "$t0" ] && [ -n "$t1" ]; then t0=\${t0/[.,]/}; t1=\${t1/[.,]/}; printf '\\n%s\\n' "${tag} e $1 $r 0 $(( (10#$t1 - 10#$t0) / 1000 )) 1"; else printf '\\n%s\\n' "${tag} e $1 $r 0 $(( (SECONDS - s0) * 1000 )) 1000"; fi; }`,
+    ...hooks.map((hook, index) => `__tw ${index} ${literal(hook.script)}`)
+  ].join('\n');
+}
+
+// The hooks the batch shows healthy, by index. The time a hook took is taken
+// at its upper bound (Bash without EPOCHREALTIME counts whole seconds), plus
+// the time the shell took to start, which a shell of its own would also spend.
+function copilotHooksHealthyInBatch(shell, hooks, env) {
+  const healthy = new Set();
+  if (hooks.length < 2) return healthy;
+  const tag = `tw-doctor-${crypto.randomBytes(6).toString('hex')}`;
+  const args = shell.argsFor(copilotHookBatchScript(shell.kind, hooks, tag));
+  if (args.reduce((total, arg) => total + arg.length + 1, 0) > HOOK_BATCH_ARGUMENT_LIMIT) return healthy;
+  const run = probeRun([shell.file, args], env, hooks.reduce((total, hook) => total + hook.seconds, 0) * 1000);
+  const startLine = new RegExp(`^${tag} s (\\d+)$`);
+  const beginLine = new RegExp(`^${tag} b (\\d+)$`);
+  const endLine = new RegExp(`^${tag} e (\\d+) (-?\\d+) (\\d+) (\\d+) (\\d+)$`);
+  let startMs = 0;
+  let current;
+  for (const line of run.stdout.split(/\r?\n/).map((text) => text.trimEnd())) {
+    const start = startLine.exec(line);
+    const begin = beginLine.exec(line);
+    const end = endLine.exec(line);
+    if (start) startMs = Number(start[1]);
+    else if (begin) current = { index: Number(begin[1]), lines: [] };
+    else if (end && current && Number(end[1]) === current.index) {
+      const hook = hooks[current.index];
+      const [, , code, errors, elapsed, resolution] = end.map(Number);
+      if (hook && code === 0 && errors === 0 && startMs + elapsed + resolution <= hook.seconds * 1000
+        && current.lines.includes(`${PROBE_MARKER} hook copilot ${hook.eventName}`)) healthy.add(current.index);
+      current = undefined;
+    } else current?.lines.push(line);
+  }
+  return healthy;
 }
 
 // Runs one command in probe mode and says what went wrong, if anything. The
@@ -937,14 +1008,22 @@ function copilotCommandChecks(installs, env) {
         checks.push({ id: `${key}:copilot-hooks-run`, status: 'info',
           detail: `${shell.name} is not on PATH here, so the ${entries.length} Copilot hook command(s) were not executed. Copilot needs the same shell to run them.` });
       } else {
-        let failures = 0;
+        // One shell for every healthy hook; each other hook alone, as Copilot
+        // runs it (copilotHooksHealthyInBatch).
         let foreign = 0;
+        const own = [];
         for (const { eventName, entry } of entries) {
           const script = process.platform === 'win32' ? entry?.powershell ?? entry?.command : entry?.bash ?? entry?.command;
           if (typeof script !== 'string') continue;
           if (!ours(script)) { foreign += 1; continue; }
           const seconds = Number(entry.timeoutSec ?? entry.timeout ?? 30);
-          const problem = probe([shell.file, shell.argsFor(script)], `${PROBE_MARKER} hook copilot ${eventName}`, env, (seconds > 0 ? seconds : 30) * 1000);
+          own.push({ eventName, script, seconds: seconds > 0 ? seconds : 30 });
+        }
+        const healthy = copilotHooksHealthyInBatch(shell, own, env);
+        let failures = 0;
+        for (const [index, { eventName, script, seconds }] of own.entries()) {
+          if (healthy.has(index)) continue;
+          const problem = probe([shell.file, shell.argsFor(script)], `${PROBE_MARKER} hook copilot ${eventName}`, env, seconds * 1000);
           if (!problem) continue;
           failures += 1;
           const consequence = FAIL_CLOSED_HOOK_EVENTS.copilot.includes(eventName)

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { main } from '../src/cli.mjs';
 import { loadConfig } from '../src/config.mjs';
 import { normalizeAgentPayload } from '../src/normalize/index.mjs';
@@ -929,7 +929,74 @@ test('install --compose is wired through from the command line to the install re
 // and only `tokenwatch import` may open them. A preloaded spy records every
 // filesystem call that reaches one; the import itself is the control that
 // shows the spy sees what it should.
-test('no hook, status render, doctor, agents or analyze run opens a session directory; only import does', () => {
+//
+// The spy wraps the real `fs` functions and calls through. It compares paths
+// the way the filesystem does, not as strings: each side is resolved, the
+// longest part that exists is taken to its real name (a Windows 8.3 short name
+// such as `RUNNER~1` and its long name are one directory, and so are a link and
+// its target), and on Windows case and slashes are folded. A path counts when
+// it is a session directory or inside one, never when it only shares a prefix.
+// It is loaded by `file:` URL, since `--import` reads a bare Windows path as a
+// URL whose scheme is the drive letter and fails before anything runs. Each run
+// must show the spy loaded, so a run it never saw cannot pass as a clean one.
+const SESSION_DIR_SPY = String.raw`
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { syncBuiltinESMExports } from 'node:module';
+const win = process.platform === 'win32';
+const realpath = fs.realpathSync.native;
+const appendFile = fs.appendFileSync;
+function canonical(input) {
+  let full = path.resolve(input);
+  if (win) full = full.replace(/^\\\\\?\\UNC\\/i, '\\\\').replace(/^\\\\\?\\/, '');
+  const rest = [];
+  let head = full;
+  for (;;) {
+    try {
+      const real = path.join(realpath(head), ...rest);
+      return win ? real.toLowerCase() : real;
+    } catch {}
+    const parent = path.dirname(head);
+    if (parent === head) return win ? full.toLowerCase() : full;
+    rest.unshift(path.basename(head));
+    head = parent;
+  }
+}
+function targetPath(target) {
+  if (typeof target === 'string') return target;
+  if (Buffer.isBuffer(target)) return target.toString();
+  if (target instanceof URL && target.protocol === 'file:') return fileURLToPath(target);
+  return undefined;
+}
+const dirs = JSON.parse(process.env.TW_SPY_DIRS).map(canonical);
+const seen = new Map();
+function note(name, target) {
+  const text = targetPath(target);
+  if (text === undefined || text === '') return;
+  const where = canonical(text);
+  if (dirs.some((dir) => where === dir || where.startsWith(dir + path.sep)) && seen.size < 50) seen.set(name + ' ' + where, true);
+}
+function wrap(owner, name, label) {
+  const original = owner[name];
+  if (typeof original !== 'function') return;
+  const wrapped = function (target, ...rest) {
+    note(label, target);
+    return original.call(this, target, ...rest);
+  };
+  for (const key of Object.keys(original)) wrapped[key] = original[key];
+  owner[name] = wrapped;
+}
+for (const name of ['readdirSync', 'opendirSync', 'openSync', 'statSync', 'lstatSync', 'readFileSync', 'existsSync', 'accessSync',
+  'realpathSync', 'readlinkSync', 'createReadStream', 'readdir', 'opendir', 'open', 'stat', 'lstat', 'readFile', 'access', 'exists',
+  'realpath', 'readlink', 'watch', 'watchFile', 'statfsSync', 'statfs', 'cpSync', 'cp', 'globSync', 'glob']) wrap(fs, name, name);
+wrap(fs.realpathSync, 'native', 'realpathSync.native');
+for (const name of ['readdir', 'opendir', 'open', 'stat', 'lstat', 'readFile', 'access', 'realpath', 'readlink', 'watch', 'statfs', 'cp', 'glob']) wrap(fs.promises, name, 'promises.' + name);
+syncBuiltinESMExports();
+process.on('exit', () => appendFile(process.env.TW_SPY_LOG, ['spy-loaded', ...seen.keys()].join('\n') + '\n'));
+`;
+
+test('no hook, status render, doctor, agents or analyze run opens a session directory; only import does', (t) => {
   const root = tempDir();
   const home = path.join(root, 'home');
   const sessionDirs = [path.join(home, '.claude', 'projects'), path.join(home, '.codex', 'sessions'), path.join(home, '.copilot', 'session-state')];
@@ -940,43 +1007,35 @@ test('no hook, status render, doctor, agents or analyze run opens a session dire
   }
   const spy = path.join(root, 'spy.mjs');
   const log = path.join(root, 'spy.log');
-  fs.writeFileSync(spy, `
-import fs from 'node:fs';
-const dirs = JSON.parse(process.env.TW_SPY_DIRS);
-const seen = new Set();
-for (const name of ['readdirSync', 'opendirSync', 'openSync', 'statSync', 'lstatSync', 'readFileSync', 'existsSync', 'accessSync', 'createReadStream', 'readdir', 'open', 'stat', 'readFile']) {
-  const original = fs[name];
-  if (typeof original !== 'function') continue;
-  fs[name] = function (target, ...rest) {
-    const text = typeof target === 'string' ? target : target instanceof URL ? target.pathname : '';
-    if (dirs.some((dir) => text.startsWith(dir))) seen.add(name);
-    return original.call(this, target, ...rest);
-  };
-}
-process.on('exit', () => fs.appendFileSync(process.env.TW_SPY_LOG, [...seen].join(',') + '\\n'));
-`);
+  fs.writeFileSync(spy, SESSION_DIR_SPY);
   const cli = fileURLToPath(new URL('../bin/tokenwatch.mjs', import.meta.url));
   const env = { ...process.env, HOME: home, USERPROFILE: home, TOKENWATCH_HOME: path.join(root, 'tw'), TW_SPY_DIRS: JSON.stringify(sessionDirs), TW_SPY_LOG: log };
   for (const key of ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'CLAUDE_CODE_SESSION_ID', 'CLAUDECODE']) delete env[key];
+  // Every call the spy matched, as `<fs function> <normalised path>`, one per line.
   const touched = (args, input) => {
     fs.rmSync(log, { force: true });
-    const result = spawnSync(process.execPath, ['--import', spy, cli, ...args], { encoding: 'utf8', env, input: input ?? '' });
-    return { status: result.status, calls: fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim() : '(no log)' };
+    const result = spawnSync(process.execPath, ['--import', pathToFileURL(spy).href, cli, ...args], { encoding: 'utf8', env, input: input ?? '' });
+    const lines = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean) : [];
+    assert.equal(lines[0], 'spy-loaded', `the spy did not load for ${args.join(' ')} (exit ${result.status}): ${result.stderr.slice(0, 400)}`);
+    const calls = lines.slice(1).join('\n');
+    if (calls) t.diagnostic(`${args.slice(0, 3).join(' ')}:\n${calls}`);
+    return calls;
   };
   const payload = JSON.stringify(fixture('claude-status-1.json'));
   for (const args of [['hook', 'claude', 'status', payload], ['doctor', '--json'], ['agents', '--json'], ['analyze', '--json'], ['export']]) {
-    assert.equal(touched(args).calls, '', `${args[0]} reached a session directory`);
+    assert.equal(touched(args), '', `${args[0]} reached a session directory`);
   }
-  assert.equal(touched(['status', '--agent', 'claude', '--ingest-stdin'], payload).calls, '', 'status reached a session directory');
+  assert.equal(touched(['status', '--agent', 'claude', '--ingest-stdin'], payload), '', 'status reached a session directory');
   for (const agent of ['claude', 'codex', 'copilot']) {
-    assert.notEqual(touched(['import', agent, '--dry-run']).calls, '', `the control: import ${agent} is seen opening its directory`);
+    // The control: the import opens its directory, and the spy sees it read a file there.
+    assert.match(touched(['import', agent, '--dry-run']), /^(readdirSync|openSync) /m, `the control: import ${agent} is seen opening its directory`);
     // Intent 19: sharing or keeping a mapping never reads a session file.
-    assert.equal(touched(['import', agent, '--export-mapping']).calls, '', `import ${agent} --export-mapping reached a session directory`);
-    assert.equal(touched(['import', agent, '--export-mapping', '--check']).calls, '', `import ${agent} --export-mapping --check ran the import`);
+    assert.equal(touched(['import', agent, '--export-mapping']), '', `import ${agent} --export-mapping reached a session directory`);
+    assert.equal(touched(['import', agent, '--export-mapping', '--check']), '', `import ${agent} --export-mapping --check ran the import`);
   }
   const mappingFile = path.join(root, 'kept.json');
   fs.writeFileSync(mappingFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(new URL('../src/import/mappings/claude.json', import.meta.url), 'utf8')), mapping_id: 'claude-jsonl-1-r1' }));
-  assert.equal(touched(['import', 'claude', '--keep-mapping', mappingFile]).calls, '', 'import --keep-mapping reached a session directory');
+  assert.equal(touched(['import', 'claude', '--keep-mapping', mappingFile]), '', 'import --keep-mapping reached a session directory');
 });
 
 // `run()` above injects a config; these go through `loadConfig()` the way the

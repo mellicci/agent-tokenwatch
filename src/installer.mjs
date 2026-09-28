@@ -163,7 +163,9 @@ function normalizeAgents(input) {
   return [...new Set(values)];
 }
 
-function installKey(scope, project) {
+// Exported so a test names a record, and every doctor check id built from it,
+// by the same rule install used, rather than by the path as it was typed.
+export function installKey(scope, project) {
   // `identityPath`, not `path.resolve`: on Windows the same project reached
   // from `c:\dev\proj` and `C:\dev\proj` must be one install record, or an
   // uninstall from the other spelling reports nothing to remove.

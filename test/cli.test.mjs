@@ -4,12 +4,13 @@ import fs from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tempDir } from './helpers.mjs';
+import { killSpy, processGone, staleKills, tempDir } from './helpers.mjs';
 import { parseJsonPayload } from '../src/input.mjs';
 import { formatStatus } from '../src/format.mjs';
 import { agentActivity, costLabel, detectHostAgent, hostSessionId } from '../src/host.mjs';
 import { composeSettings, defaultConfig } from '../src/config.mjs';
 import { MAX_COMPOSE_OUTPUT_BYTES, MAX_STDIN_BYTES } from '../src/constants.mjs';
+import { findGitBash } from '../src/spawn.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const cli = path.join(root, 'bin', 'tokenwatch.mjs');
@@ -285,9 +286,9 @@ function cleanEnv(extra = {}) {
   return env;
 }
 
-function composedRender(home, { input = statusPayload, args = [], env = {} } = {}) {
+function composedRender(home, { input = statusPayload, args = [], env = {}, nodeArgs = [] } = {}) {
   const started = Date.now();
-  const result = spawnSync(process.execPath, [cliBin, 'status', '--agent', 'claude', '--ingest-stdin', '--compose', 'user', ...args],
+  const result = spawnSync(process.execPath, [...nodeArgs, cliBin, 'status', '--agent', 'claude', '--ingest-stdin', '--compose', 'user', ...args],
     { input, env: cleanEnv({ TOKENWATCH_HOME: home, ...env }), timeout: 20000 });
   return { ...result, stdout: result.stdout.toString(), elapsed: Date.now() - started };
 }
@@ -348,7 +349,7 @@ for (const [name, body, expectOther] of [
   });
 }
 
-test('a composed command that runs past the limit is stopped, and Tokenwatch renders alone within the limit', () => {
+test('a composed command that runs past the limit is stopped, and Tokenwatch renders alone within the limit', async () => {
   const home = composeHome('', { status: { composeTimeoutMs: 300 } });
   const command = otherTool(home, `fs.writeFileSync(dir + '/pid', String(process.pid)); process.stdout.write('LATE\\n'); setTimeout(() => {}, 5000);`);
   const state = JSON.parse(fs.readFileSync(path.join(home, 'install-state.json')));
@@ -360,7 +361,96 @@ test('a composed command that runs past the limit is stopped, and Tokenwatch ren
   assert.doesNotMatch(result.stdout, /LATE/, "a timed-out command's partial output is not shown");
   assert.match(result.stdout, /session/i);
   const pid = Number(fs.readFileSync(path.join(home, 'pid'), 'utf8'));
-  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'the timed-out command is not left running');
+  assert.ok(await processGone(pid), 'the timed-out command is not left running');
+});
+
+// A status line is a shell running a program, and the program can start more.
+// Windows has no process group a kill reaches whole: stopping only the shell
+// left the program running, holding the render open until it ended by itself,
+// and then orphaned. Every shell a status line runs under here must lose the
+// whole tree when the limit passes.
+const gitBash = process.platform === 'win32' ? findGitBash() : undefined;
+const treeShells = process.platform === 'win32'
+  ? [{ shell: 'cmd' }, ...(gitBash ? [{ shell: 'bash', shellPath: gitBash }] : []), { shell: 'powershell' }]
+  : [{ shell: 'posix' }];
+for (const shellSpec of treeShells) {
+  test(`a composed command under ${shellSpec.shell} that runs past the limit leaves nothing it started running`, async () => {
+    const home = tempDir('tw-compose-tree-');
+    const script = path.join(home, 'other tool.mjs');
+    fs.writeFileSync(script, `import fs from 'node:fs';
+import { spawn } from 'node:child_process';
+const grandchild = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { stdio: 'ignore' });
+fs.writeFileSync(${JSON.stringify(path.join(home, 'pids'))}, JSON.stringify([process.pid, grandchild.pid]));
+process.stdout.write('LATE\\n');
+setTimeout(() => {}, 20000);
+`);
+    const words = `"${process.execPath}" "${script}"`;
+    const command = shellSpec.shell === 'powershell' ? `& ${words}` : words;
+    fs.writeFileSync(path.join(home, 'install-state.json'), JSON.stringify({
+      version: 1, installs: { user: { claude: { statusInstalled: true, statusCommand: 'recorded', compose: [{ command, ...shellSpec }] } } }
+    }));
+    // The limit has to outlast the shell's own start-up, or nothing is running
+    // yet when it passes and the tree kill is never exercised: Windows
+    // PowerShell 5.1 and node together took over 2 s on a busy runner.
+    const limit = shellSpec.shell === 'powershell' ? 8000 : 2000;
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ status: { composeTimeoutMs: limit } }));
+    const result = composedRender(home);
+    assert.equal(result.status, 0);
+    assert.ok(result.elapsed < limit + 4000, `the render waited ${result.elapsed} ms for a command stopped at ${limit} ms`);
+    assert.doesNotMatch(result.stdout, /LATE/);
+    assert.match(result.stdout, /session/i);
+    assert.ok(fs.existsSync(path.join(home, 'pids')), 'the other command started within the limit');
+    const [program, grandchild] = JSON.parse(fs.readFileSync(path.join(home, 'pids'), 'utf8'));
+    assert.ok(await processGone(program), 'the program the shell started is not left running');
+    assert.ok(await processGone(grandchild), 'nor is anything that program started');
+  });
+}
+
+// A status command can start a program and return, and the program then
+// holds the pipe after the shell has exited. Once Node has seen the shell
+// exit, the shell's id is free, and Windows gives ids out again quickly: a
+// timeout that then ran `taskkill /T /F /PID <id>`, or killed that id or its
+// process group, stopped whatever unrelated program had been given the id,
+// and everything that program had started. A preload in the render records
+// what it starts and kills (killSpy, test/helpers.mjs).
+test('a composed command whose shell has already exited is never killed by its old id, and the render still ends at the limit', async () => {
+  const home = tempDir('tw-compose-exited-');
+  const program = path.join(home, 'program.mjs');
+  // It writes until a write fails: that is how it learns nobody reads it.
+  fs.writeFileSync(program, `import fs from 'node:fs';
+fs.writeFileSync(${JSON.stringify(path.join(home, 'pid'))}, String(process.pid));
+setInterval(() => process.stdout.write('LATE\\n'), 100);
+setTimeout(() => process.exit(0), 20000);
+`);
+  const launcher = path.join(home, 'launcher.mjs');
+  // Detached on Windows only because Node puts every other child in a job
+  // object that ends it when its parent (here the launcher) exits.
+  fs.writeFileSync(launcher, `import { spawn } from 'node:child_process';
+spawn(process.execPath, [${JSON.stringify(program)}], { stdio: ['ignore', 'inherit', 'ignore'], detached: process.platform === 'win32', windowsHide: true }).unref();
+`);
+  const spy = killSpy(home);
+  fs.writeFileSync(path.join(home, 'install-state.json'), JSON.stringify({
+    version: 1, installs: { user: { claude: { statusInstalled: true, statusCommand: 'recorded', compose: [{ command: `"${process.execPath}" "${launcher}"`, shell: composeShell }] } } }
+  }));
+  const limit = process.platform === 'win32' ? 4000 : 1500;
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ status: { composeTimeoutMs: limit } }));
+  const result = composedRender(home, { nodeArgs: ['--require', spy.preload] });
+  assert.equal(result.status, 0);
+  assert.ok(fs.existsSync(path.join(home, 'pid')), 'the program started within the limit');
+  const lines = spy.read();
+  const spawned = lines.filter((line) => line.startsWith('spawn '));
+  assert.equal(spawned.length, 1, `the render started only the other command's shell: ${lines.join(' | ')}`);
+  assert.ok(lines.includes(`exit ${spawned[0].slice(6)}`), `the case needs the shell to exit before the limit: ${lines.join(' | ')}`);
+  assert.deepEqual(staleKills(lines), [], `a kill went to an id Node had already seen exit: ${lines.join(' | ')}`);
+  // The program held the pipe, so the render waited for the limit, and not
+  // beyond it: nothing is left to wait for once the pipes are let go.
+  assert.ok(result.elapsed < limit + 3000, `the render waited ${result.elapsed} ms for a limit of ${limit} ms`);
+  assert.doesNotMatch(result.stdout, /LATE/, 'what a command printed past the limit is not shown');
+  assert.match(result.stdout, /session/i);
+  // What happens to it: nothing kills it, and its next write, to a pipe no one
+  // reads any more, fails, which ends a program that keeps writing.
+  const pid = Number(fs.readFileSync(path.join(home, 'pid'), 'utf8'));
+  assert.ok(await processGone(pid, { timeoutMs: 5000 }), 'the program ended at its next write once the pipe was let go');
 });
 
 test('a composed render cancelled by the agent takes the other command with it', { skip: process.platform === 'win32' ? 'POSIX signals' : false }, async () => {
@@ -378,8 +468,7 @@ test('a composed render cancelled by the agent takes the other command with it',
   const pid = Number(fs.readFileSync(pidFile, 'utf8'));
   parent.kill('SIGTERM');
   await new Promise((resolve) => parent.on('close', resolve));
-  await new Promise((r) => setTimeout(r, 200));
-  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'the other command must not outlive a cancelled render');
+  assert.ok(await processGone(pid), 'the other command must not outlive a cancelled render');
   assert.equal(stateFiles(home).length, 1, 'the reading was recorded before the render waited on the other command (D2)');
 });
 
@@ -398,16 +487,21 @@ function listHome(bodies, { status } = {}) {
   return home;
 }
 
-test('three other status lines print in record order, and one that hangs leaves the others and Tokenwatch\'s rows intact', () => {
+test('three other status lines print in record order, and one that hangs leaves the others and Tokenwatch\'s rows intact', async () => {
   const bodies = [
-    `fs.writeFileSync(dir + '/pid-a', String(process.pid)); process.stdout.write('A-LATE\\n'); setTimeout(() => {}, 5000);`,
+    `fs.writeFileSync(dir + '/pid-a', String(process.pid)); process.stdout.write('A-LATE\\n'); setTimeout(() => {}, 20000);`,
     `process.stdout.write('B-ROW\\n'); process.exitCode = 3;`,
     `process.stdout.write('C-ROW');`
   ];
+  // The limit is what the two quick commands need to start Node and print on a
+  // loaded machine (300 ms was not always enough); the hung one would hold
+  // the render for 20 s.
+  const limit = 2000;
   for (const order of ['last', 'first']) {
-    const home = listHome(bodies, { status: { composeTimeoutMs: 300, composeOrder: order } });
+    const home = listHome(bodies, { status: { composeTimeoutMs: limit, composeOrder: order } });
     const result = composedRender(home);
     assert.equal(result.status, 0);
+    assert.ok(result.elapsed < limit + 4000, `${order}: the hung command held the render for ${result.elapsed} ms`);
     const own = result.stdout.replace('B-ROW\nC-ROW\n', '');
     assert.notEqual(own, result.stdout, `${order}: both finished commands print, in record order: ${JSON.stringify(result.stdout)}`);
     assert.match(own, /session/i, 'Tokenwatch\'s rows still print');
@@ -415,7 +509,7 @@ test('three other status lines print in record order, and one that hangs leaves 
     if (order === 'last') assert.ok(result.stdout.startsWith('B-ROW\nC-ROW\n'), 'the block comes first');
     else assert.ok(result.stdout.endsWith('B-ROW\nC-ROW\n'), 'the block comes after Tokenwatch\'s rows');
     const pid = Number(fs.readFileSync(path.join(home, 'pid-a'), 'utf8'));
-    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'the hung command is not left running');
+    assert.ok(await processGone(pid), 'the hung command is not left running');
   }
 });
 
@@ -431,8 +525,7 @@ test('a composed render cancelled by the agent takes every other command with it
   const pids = pidFiles.map((file) => Number(fs.readFileSync(file, 'utf8')));
   parent.kill('SIGTERM');
   await new Promise((resolve) => parent.on('close', resolve));
-  await new Promise((r) => setTimeout(r, 200));
-  for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'no other command outlives a cancelled render');
+  for (const pid of pids) assert.ok(await processGone(pid), 'no other command outlives a cancelled render');
   assert.equal(stateFiles(home).length, 1, 'the reading was recorded before the render waited (D2)');
 });
 
@@ -569,4 +662,25 @@ test('status still ingests the payload piped to it with --ingest-stdin', () => {
   const snapshot = JSON.parse(piped.stdout);
   assert.equal(snapshot.session_scope.session_id, 'ingest-1', piped.stdout);
   assert.equal(snapshot.session_scope.basis, 'stdin', piped.stdout);
+});
+
+// On a fresh install several hooks can start at once, and each used to create
+// config.json with its own random projectSalt: the last rename won, and the
+// hooks that lost had already hashed their project with a salt that no longer
+// exists, so one project was recorded under two identities.
+test('processes that create config.json together all end up with the one project salt it keeps', async () => {
+  const home = tempDir();
+  const script = `import(${JSON.stringify(new URL('../src/config.mjs', import.meta.url).href)}).then((m) => process.stdout.write(m.loadConfig().config.projectSalt))`;
+  const runs = Array.from({ length: 12 }, () => new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+      env: { ...process.env, TOKENWATCH_HOME: home }, stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let out = '';
+    child.stdout.on('data', (chunk) => { out += chunk; });
+    child.on('exit', () => resolve(out));
+  }));
+  const salts = await Promise.all(runs);
+  const kept = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8')).projectSalt;
+  assert.match(kept, /^[0-9a-f]{64}$/);
+  assert.deepEqual([...new Set(salts)], [kept], `${new Set(salts).size} different salts were used`);
 });

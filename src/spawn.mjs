@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -134,6 +134,64 @@ export function findOnPath(name, env = process.env, platform = process.platform)
 export function spawnShellLine(command, shellSpec, options = {}) {
   const { file, args, shell } = shellLineInvocation(command, shellSpec);
   return spawn(file, args, { ...options, shell, windowsHide: true });
+}
+
+// Stop every process a spawnShellLine child started, not only the shell.
+// Off Windows each such child is spawned detached, leading its own process
+// group, so one SIGKILL to the group takes the shell and whatever it started.
+// Windows has no group a kill reaches whole: killing the shell (cmd.exe, Git
+// Bash, PowerShell) leaves the program it started running, holding the pipes
+// Tokenwatch reads, so a hung status command kept the render waiting until it
+// finished by itself. `taskkill /T` walks the tree by parent id, which has to
+// happen while the shell is still alive, so it runs first, once for all the
+// children together, so stopping several costs one bound, not one each. It is
+// taken from the system folder, never looked up on PATH, and bounded like
+// everything else on the status path: a stop adds at most this much.
+export const TREE_KILL_TIMEOUT_MS = 2000;
+
+// A child is killed by its id only while Node has not seen it exit
+// (`exitCode` and `signalCode` both still null). Until then the id cannot
+// belong to anything else: off Windows an exited child stays a zombie until
+// Node reaps it, and it is Node that sets those fields when it does; on
+// Windows Node holds a handle to the process until it has seen the exit, and
+// Windows does not reuse an id while a handle to its process is open. Once
+// Node has seen the exit the id is free, and Windows in particular hands ids
+// out again quickly, so `taskkill /T /F /PID` or a kill by that number would
+// land on whatever unrelated program got it, and on everything that program
+// started. A shell that exited while a program it started still holds the
+// pipes is therefore not killed at all: the caller lets go of the pipes, and
+// that program keeps running until it ends by itself, or until its next write
+// to the pipe Tokenwatch no longer reads fails. Its own id is one Tokenwatch
+// never learned, so there is nothing safe to kill it by.
+//
+// One risk remains while the shell is alive, and it is taskkill's own: `/T`
+// follows the parent id each process recorded at its start, which Windows
+// does not update, so a process started by an earlier, exited program that
+// happened to have the shell's id is taken for the shell's child. That is how
+// every tree kill on Windows works; the alternative is leaving the program the
+// shell started running.
+//
+// Returns the children it stopped.
+export function killProcessTrees(children, { platform = process.platform, env = process.env } = {}) {
+  const live = children.filter((child) => Number.isInteger(child?.pid) && child.pid > 0
+    && child.exitCode === null && child.signalCode === null);
+  if (!live.length) return live;
+  if (platform !== 'win32') {
+    for (const child of live) {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    return live;
+  }
+  const taskkill = path.join(env.SystemRoot || env.windir || 'C:\\Windows', 'System32', 'taskkill.exe');
+  spawnSync(taskkill, ['/T', '/F', ...live.flatMap((child) => ['/PID', String(child.pid)])],
+    { stdio: 'ignore', windowsHide: true, timeout: TREE_KILL_TIMEOUT_MS });
+  // Whatever taskkill could not reach, the shell itself still goes, through
+  // Node's handle rather than its id: once that process has exited, this does
+  // nothing.
+  for (const child of live) {
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  }
+  return live;
 }
 
 // Where Claude Code finds Git Bash on Windows: CLAUDE_CODE_GIT_BASH_PATH when

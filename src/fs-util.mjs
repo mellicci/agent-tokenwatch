@@ -158,6 +158,51 @@ function writeAtomic(file, contents, mode, followSymlink) {
   throw new Error(`Cannot create a temporary file beside ${target}: ${lastError?.code ?? 'EEXIST'}`);
 }
 
+// Publishes a JSON file only if none exists yet, and says whether this call did.
+// The text is written whole under a temporary name and hard-linked into place,
+// which fails with EEXIST when another process got there first, so no reader
+// ever sees half a file and no writer replaces another's. Where the link cannot
+// be made for any other reason - FAT and exFAT volumes, some network shares -
+// it falls back to an exclusive create, which a reader can catch half-written;
+// readJsonSettled covers that window.
+export function createJsonExclusively(file, value, mode = 0o600) {
+  const text = `${JSON.stringify(value, null, 2)}\n`;
+  const temp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  let linkFailed = false;
+  try {
+    fs.writeFileSync(temp, text, { mode, flag: 'wx' });
+    fs.linkSync(temp, file);
+    return true;
+  } catch (error) {
+    if (error?.code === 'EEXIST') return false;
+    linkFailed = true;
+  } finally {
+    try { fs.unlinkSync(temp); } catch {}
+  }
+  if (!linkFailed) return false;
+  try {
+    fs.writeFileSync(file, text, { mode, flag: 'wx' });
+    return true;
+  } catch (error) {
+    if (error?.code === 'EEXIST') return false;
+    throw error;
+  }
+}
+
+// Reads a JSON file another process may be creating right now without a link
+// (see createJsonExclusively): a parse failure is retried for a moment before
+// it counts. A missing file is `fallback` at once.
+export function readJsonSettled(file, fallback = null, { attempts = 20, waitMs = 10 } = {}) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return readJson(file, fallback);
+    } catch (error) {
+      if (attempt >= attempts) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs);
+    }
+  }
+}
+
 // `followSymlink` defaults to false: the safe behaviour is to write exactly the
 // path you were given. Only a caller that knows the path came from the user -
 // a user-scope config file - should opt into following a link.

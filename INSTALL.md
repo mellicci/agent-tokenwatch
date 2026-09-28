@@ -607,9 +607,14 @@ printed in the order they were adopted; `status.composeOrder` and
 `status.composeTimeoutMs` tune them ([docs/configuration.md](docs/configuration.md)).
 For a status tool that needs its own shell or environment, the package ships a
 wrapper template, `examples/statusline-wrapper.mjs`, to copy and set as the
-status line; Tokenwatch never runs it itself. On Windows, a timed-out or
-cancelled render stops the shell that ran each other command, but a program that
-shell started may keep running until it exits by itself.
+status line; Tokenwatch never runs it itself. A command still running at
+`status.composeTimeoutMs` is stopped with everything it started, on Windows too
+(`taskkill /T`, which can add up to 2 s to that render). On Windows a render the
+agent itself terminates cannot stop anything, so a program started by the other
+command may then keep running until it exits by itself. The same holds for a
+program the other command started and then returned from: once that command's
+shell has exited, its process id may already belong to another program, so
+Tokenwatch does not kill by it, and only stops reading the program's output.
 
 If `doctor` shows neither warning:
 

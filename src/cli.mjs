@@ -1,31 +1,31 @@
 import fs from 'node:fs';
-import { spawnPortable, spawnShellLine } from './spawn.mjs';
+import { killProcessTrees, spawnPortable, spawnShellLine } from './spawn.mjs';
 import { parseArgv, boolOption, numberOption } from './args.mjs';
-import { analyzeEvents, formatAuditMarkdown } from './analyze.mjs';
 import { rollingStatusFromState, turnReadings } from './aggregate.mjs';
 import { COMPOSED_ENV, MAX_COMPOSE_OUTPUT_BYTES, PACKAGE_VERSION, PROBE_ENV, PROBE_MARKER } from './constants.mjs';
 import { composeSettings, configPath, getConfigValue, loadConfig, saveConfig, setConfigValue, tokenwatchHome } from './config.mjs';
-import { runDoctor, formatDoctor } from './doctor.mjs';
 import { agentActivity, costLabel, detectHostAgent, hostSessionId, launchedThroughCodexWrapper } from './host.mjs';
 import { safeIdentifier } from './privacy.mjs';
-import { eventsToCsv } from './export.mjs';
 import { formatStatus, jsonString } from './format.mjs';
 import { HELP } from './help.mjs';
 import { readStdin, readStdinBytes, parseJsonPayload } from './input.mjs';
-import { composeEntries, composedStatusCommand, install, isTokenwatchRelay, listInstalls, priorCodexNotify, uninstall } from './installer.mjs';
 import { normalizeAgentPayload } from './normalize/index.mjs';
-import { startOtlpServer } from './otlp-server.mjs';
 import { STATUS_LOCK_BUDGET_MS } from './state-lock.mjs';
 import { collectEvents, emptyStatusState, loadSessionState, pendingTurnRows, previewSessionState, pruneEvents, resolveStatusSession, storeEvents, tryFlushPendingTurns } from './store.mjs';
 import { isWriteRefused } from './fs-util.mjs';
 import { recordRelayOutcome } from './relay-record.mjs';
-import { repairLedger } from './repair.mjs';
-import { rankGroups, turnConcentration, compactionSummary, comparePeriods } from './rank.mjs';
-import { addExperiment, closeExperiment, listExperiments, formatExperiments } from './experiments.mjs';
 import { sinceDate } from './time.mjs';
-import { runImport } from './import/run.mjs';
-import { undoImport } from './import/undo.mjs';
-import { exportMapping, keepMapping } from './import/override.mjs';
+
+// Every hook and status render is a process of its own, started by the agent
+// for every event, and loading this whole module graph was about half of each
+// one's time on Windows (91 of 174 ms, windows-latest, Node 22): doctor, the
+// installer, the history import and the analysis load and compile on every
+// hook while no hook uses them. They are loaded by the commands that do.
+let installerModule;
+async function installer() {
+  installerModule ??= await import('./installer.mjs');
+  return installerModule;
+}
 
 function parseConfigValue(raw) {
   if (raw === undefined) return undefined;
@@ -114,20 +114,25 @@ function runComposedCommands(specs, bytes, { timeoutMs }) {
     const signals = ['SIGTERM', 'SIGINT', 'SIGHUP'];
     let settled = false;
     const runs = specs.map(() => ({ child: undefined, out: [], size: 0, truncated: false, outcome: undefined }));
-    const kill = (run) => {
-      if (!run.child?.pid) return;
-      // Off Windows each child leads its own process group, so the shell and
-      // whatever it started go together. SIGKILL at once: a status line has
-      // nothing to shut down gracefully (intent 04, D16).
-      try {
-        if (process.platform !== 'win32') process.kill(-run.child.pid, 'SIGKILL');
-        else run.child.kill('SIGKILL');
-      } catch { /* already gone */ }
+    // Every child still running goes with everything it started, at once and
+    // without a grace period: a status line has nothing to shut down (intent
+    // 04, D16). A shell that has already exited, while a program it started
+    // still holds the pipe, is not killed: its id may already be another
+    // program's (killProcessTrees). Every unfinished child's pipes are then
+    // let go, so neither that program nor a descendant the kill could not
+    // reach can hold the render open until it finishes on its own.
+    const unfinished = () => runs.filter((run) => run.outcome === undefined && run.child);
+    const stop = (stopping) => {
+      killProcessTrees(stopping.map((run) => run.child));
+      for (const { child } of stopping) {
+        child.stdout?.destroy();
+        child.stdin?.destroy();
+        child.unref();
+      }
     };
-    const stopAll = () => { for (const run of runs) if (run.outcome === undefined) kill(run); };
     // The agent cancels an in-flight status script when the next update
     // arrives (Claude Code status-line docs): every child goes with us.
-    const onSignal = (signal) => { stopAll(); process.exit(signal === 'SIGINT' ? 130 : 143); };
+    const onSignal = (signal) => { stop(unfinished()); process.exit(signal === 'SIGINT' ? 130 : 143); };
     const settle = () => {
       if (settled) return;
       settled = true;
@@ -145,8 +150,10 @@ function runComposedCommands(specs, bytes, { timeoutMs }) {
       if (runs.every((each) => each.outcome !== undefined)) settle();
     };
     const timer = setTimeout(() => {
-      stopAll();
+      // Marked first, so nothing the stop itself reports can change them.
+      const stopping = unfinished();
       for (const run of runs) if (run.outcome === undefined) run.outcome = 'timeout';
+      stop(stopping);
       settle();
     }, timeoutMs);
     for (const signal of signals) process.on(signal, onSignal);
@@ -240,7 +247,7 @@ async function handleStatus(args, config, env = process.env) {
       // none, and runComposedCommands resolves with an outcome in every case.
       // A failed read has already said why above, so it says nothing more here.
       const refusal = bytes === undefined ? null : !bytes.length ? 'no payload on stdin' : composeRefusal(options, agent);
-      const specs = (refusal || bytes === undefined ? null : composedStatusCommand(config, composeKey, agent)) ?? [];
+      const specs = (refusal || bytes === undefined ? null : (await installer()).composedStatusCommand(config, composeKey, agent)) ?? [];
       if (refusal) composeDebug(refusal);
       else if (bytes !== undefined && !specs.length) composeDebug(`no composable status line recorded for ${agent} under ${composeKey}`);
       // Started before Tokenwatch's own ingest, so the reading is recorded
@@ -386,6 +393,9 @@ async function handleImport(args, config, env) {
     process.stderr.write('usage: tokenwatch import <claude|codex|copilot> [--check] [--dry-run] [--since 30d] [--accept-unverified] [--mapping <file>] [--keep-mapping <file>] [--export-mapping] [--undo <mapping id> [--run <run id>]] [--json]\n');
     return 1;
   }
+  const [{ runImport }, { undoImport }, { exportMapping, keepMapping }] = await Promise.all([
+    import('./import/run.mjs'), import('./import/undo.mjs'), import('./import/override.mjs')
+  ]);
   // Keep and export a mapping (intent 19): handled before any import, and
   // neither opens a session file.
   const KEEP_REFUSALS = {
@@ -523,6 +533,9 @@ async function handleImport(args, config, env) {
 
 async function handleAnalyze(args, config) {
   const { options } = parseArgv(args);
+  const [{ analyzeEvents, formatAuditMarkdown }, { rankGroups, turnConcentration, compactionSummary, comparePeriods }] = await Promise.all([
+    import('./analyze.mjs'), import('./rank.mjs')
+  ]);
   const flush = tryFlushPendingTurns(config);
   const since = options.since ? sinceDate(options.since) : undefined;
   const agents = options.agent ? String(options.agent).split(',').map(normalizedAgentName) : undefined;
@@ -557,8 +570,9 @@ async function handleAnalyze(args, config) {
   return 0;
 }
 
-function handleExperiment(args, config) {
+async function handleExperiment(args, config) {
   const { positionals, options } = parseArgv(args);
+  const { addExperiment, closeExperiment, listExperiments, formatExperiments } = await import('./experiments.mjs');
   const subcommand = positionals[0] || 'list';
   if (subcommand === 'add') {
     const record = addExperiment(config, {
@@ -585,6 +599,7 @@ function handleExperiment(args, config) {
 
 async function handleExport(args, config) {
   const { options } = parseArgv(args);
+  const { eventsToCsv } = await import('./export.mjs');
   const flush = tryFlushPendingTurns(config);
   const since = options.since ? sinceDate(options.since) : undefined;
   const agents = options.agent ? String(options.agent).split(',').map(normalizedAgentName) : undefined;
@@ -624,11 +639,12 @@ async function handlePrune(args, config) {
 // left out. The record on disk keeps all of it (intent 16, D14, D29, D32).
 // The same holds for the other prior values an install keeps to restore:
 // a displaced Copilot hooks file and a displaced Codex notifier (review 2, D33).
+// Called by install and paths, once they have loaded the installer.
 function redactComposeCommands(record) {
   const redact = (agentRecord) => {
     if (!agentRecord) return agentRecord;
     const { priorStatusLine, file, compose, priorHooks, priorNotifyLine, ...rest } = agentRecord;
-    const entries = composeEntries(agentRecord);
+    const entries = installerModule.composeEntries(agentRecord);
     return entries.length
       ? { ...rest, compose: entries.map(({ sha256, sourceFile, level, shell, adoptedAt, carried }) => ({ sha256, sourceFile, level, shell, adoptedAt, ...(carried ? { carried } : {}) })) }
       : rest;
@@ -682,7 +698,7 @@ function installOptions(options) {
 // adds a broader check that is only safe here: refusing to run anything named
 // like a Tokenwatch binary costs nothing, while treating such a line as ours at
 // install time would overwrite it without `--force`.
-function relaysToSelf(argv) {
+function relaysToSelf(argv, { isTokenwatchRelay }) {
   return isTokenwatchRelay(argv) || argv.some((value) => /(^|[\\/])tokenwatch(-codex)?(\.mjs|\.cmd|\.exe)?$/i.test(String(value)));
 }
 
@@ -723,15 +739,16 @@ async function handleNotifyRelay(args, config) {
   // Scoped to the installation whose config.toml invoked this relay. Without
   // `--install` nothing is relayed, which is the safe default for a hand-run
   // command and for a relay line written by an older version.
-  const prior = priorCodexNotify(config, options.install);
-  const relayed = Boolean(prior?.length) && !relaysToSelf(prior) && typeof payloadText === 'string';
+  const recorded = await installer();
+  const prior = recorded.priorCodexNotify(config, options.install);
+  const relayed = Boolean(prior?.length) && !relaysToSelf(prior, recorded) && typeof payloadText === 'string';
   if (relayed) {
     // The user's own notifier failing to start does not stop Tokenwatch
     // recording, so it is recorded under its own stage and `doctor` keeps it
     // apart from the failures that lose a turn.
     const spawnFailed = (error) => recordRelayOutcome(config, { ok: false, stage: 'relay-spawn', error, payload: payloadSource });
     try {
-      const child = spawnPortable(prior[0], [...prior.slice(1), payloadText], { stdio: 'ignore', detached: false });
+      const child = spawnPortable(prior[0], [...prior.slice(1), payloadText], { stdio: 'ignore', detached: false, windowsHide: true });
       // A ChildProcess that emits 'error' with no listener is an uncaught
       // exception. The notifier may have been uninstalled or renamed since the
       // install, and on Windows it is commonly an npm `.cmd` shim - so without
@@ -750,6 +767,7 @@ async function handleOtlp(args, config) {
   const { positionals, options } = parseArgv(args);
   const subcommand = positionals[0] || 'serve';
   if (subcommand !== 'serve') throw new Error(`Unknown otlp subcommand: ${subcommand}`);
+  const { startOtlpServer } = await import('./otlp-server.mjs');
   const receiver = await startOtlpServer(config, {
     host: options.host || config.codex.otlpHost,
     port: numberOption(options.port, config.codex.otlpPort),
@@ -831,6 +849,7 @@ export async function main(argv = process.argv.slice(2), injected = {}) {
       // A real repair rewrites the ledger and fails on its own write there,
       // which is the honest outcome for a command whose job is to write.
       tryFlushPendingTurns(config);
+      const { repairLedger } = await import('./repair.mjs');
       process.stdout.write(jsonString(await repairLedger(config, { dryRun: boolOption(parsed.options.dryRun, false) })));
       return 0;
     }
@@ -840,7 +859,7 @@ export async function main(argv = process.argv.slice(2), injected = {}) {
     case 'otlp': return handleOtlp(rest, config);
     case 'install': {
       const parsed = parseArgv(rest);
-      const record = install(config, installOptions(parsed.options));
+      const record = (await installer()).install(config, installOptions(parsed.options));
       if (record.installLocation?.status === 'warn') process.stderr.write(`WARN install-location: ${record.installLocation.detail}\n`);
       if (record.claude?.nodeWarning) process.stderr.write(`WARN claude-node: ${record.claude.nodeWarning}\n`);
       for (const agent of ['claude', 'copilot']) {
@@ -855,13 +874,14 @@ export async function main(argv = process.argv.slice(2), injected = {}) {
     }
     case 'uninstall': {
       const parsed = parseArgv(rest);
-      const result = uninstall(config, installOptions(parsed.options));
+      const result = (await installer()).uninstall(config, installOptions(parsed.options));
       for (const warning of result.warnings ?? []) process.stderr.write(`WARN settings: ${warning}\n`);
       for (const warning of result.skillWarnings ?? []) process.stderr.write(`WARN skills: ${warning}\n`);
       process.stdout.write(jsonString(result.record ? { ...result, record: withoutSkillText(result.record) } : result));
       return 0;
     }
     case 'doctor': {
+      const { runDoctor, formatDoctor } = await import('./doctor.mjs');
       const report = runDoctor(config, configFile);
       if (options.json) process.stdout.write(jsonString(report));
       else process.stdout.write(formatDoctor(report));
@@ -871,7 +891,7 @@ export async function main(argv = process.argv.slice(2), injected = {}) {
     case 'paths': {
       // The records as install prints them: another tool's status command by
       // hash and file, no displaced prior values, no skill text (D33's residue).
-      const managedInstalls = Object.fromEntries(Object.entries(listInstalls(config)).map(([key, record]) => [key, redactComposeCommands(record)]));
+      const managedInstalls = Object.fromEntries(Object.entries((await installer()).listInstalls(config)).map(([key, record]) => [key, redactComposeCommands(record)]));
       process.stdout.write(jsonString({ home: tokenwatchHome(env), config: configFile, data: config.dataFile, state: config.stateFile, installs: config.installStateFile, managedInstalls }));
       return 0;
     }

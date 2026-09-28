@@ -153,6 +153,14 @@
 
 ### Doctor
 
+- **`doctor` probes healthy Copilot hooks through one shell.** It started a
+  shell per hook: ten PowerShell starts, about 9 s of a 16 s run on Windows.
+  Now one shell runs them all, each wrapped so that shell reports the hook's
+  own exit code and time. A hook that fails there, overruns its own limit, or
+  ends or breaks that shell is run again alone, as Copilot runs it, and only
+  that run decides what `doctor` reports for it, so the failures named are the
+  ones a shell per hook finds. A hook that hangs costs its run time, up to the
+  sum of the hooks' limits, before that retry.
 - **An undone import no longer ages the ledger in `doctor`'s retention line.**
   The check counted the earliest row of every import run, including one whose
   rows `--undo` had removed, so it reported history the ledger no longer held.
@@ -203,6 +211,36 @@
 
 ### Status line
 
+- **The status-line wrapper template stops a timed-out command with
+  everything it started.** On Windows, killing the shell left the program it
+  started running and holding the pipe, so the wrapper waited for it; it now
+  kills the whole tree and stops waiting for output it discards. Every command
+  still running is stopped at once, with one `taskkill` on Windows, so several
+  hung commands cost one 2 s bound rather than one each. The same rule as for a
+  composed status command applies: a command whose shell has already exited is
+  never killed by its old process id.
+- **On Windows, a composed status command that runs past its limit no longer
+  holds up the status line.** Tokenwatch stopped only the shell that ran the
+  other tool's status command, so the program it started kept running, and
+  Tokenwatch waited for it to finish: a command that hung for five seconds
+  delayed every render by five seconds, and was then left running on its own.
+  At `status.composeTimeoutMs` the command is now stopped together with
+  everything it started (`taskkill /T`, from the system folder, once for all
+  of them; it can add up to 2 s to that render), and Tokenwatch no longer waits
+  on output it has given up on. Tokenwatch's own rows render within the limit.
+- **A timed-out or cancelled composed status command is never killed by a
+  process id that may belong to another program.** A status command can start
+  a program and return, leaving the program holding the pipe. Once the shell
+  has exited, its id is free, and Windows reuses ids quickly, so the stop could
+  have force-killed an unrelated program with everything it had started. A
+  shell is now stopped only while Node still holds it, which guarantees the id
+  is still its own, and the Windows fallback goes through Node's handle rather
+  than the id. For a shell that has already exited, Tokenwatch only lets go of
+  the pipes: the program it left behind is not killed, since nothing safe
+  identifies it, and it runs until it ends by itself or its next write to the
+  pipe fails. On macOS and Linux this also changes one case: such a program
+  used to be killed with the shell's process group, and is now left the same
+  way.
 - **A hand-run `tokenwatch status` no longer waits on stdin.** It used to read
   stdin whenever it was not a terminal, so a caller that left a pipe open - an
   agent's shell tool, a CI step, `ssh -T` - hung it indefinitely. Only
@@ -241,11 +279,17 @@
   render. It refuses a status line that already runs Tokenwatch, and
   `--compose --force` on a first install. `doctor` gains a `status-compose`
   check that reports when the other tool's command has changed since install,
-  without running or quoting it. On Windows a timed-out or cancelled render stops the shell that ran the other command, but a program that shell started may keep running until it exits by itself. Needs a
-  hands-on Windows test.
+  without running or quoting it. On Windows a render the agent itself
+  terminates cannot stop anything, so a program the other command started may
+  keep running until it exits by itself. Needs a hands-on Windows test.
 
 ### Accounting and correctness
 
+- **A fresh install keeps one project salt.** Several hooks starting at once
+  could each create `config.json` with its own random `projectSalt`; the last
+  write won, and the hooks that lost had already recorded their project under
+  a salt that was then gone. The file is now created once, and a process that
+  loses the race uses the salt that was kept.
 - **Fixed: every Copilot model call was counted as a turn.** Copilot sends no
   turn or prompt id, so each movement of its cumulative counters - one model
   call - was a turn of its own: a Windows live test showed 16 turns for a
@@ -513,6 +557,10 @@ has a regression test that fails without its fix.
 
 ### Cross-platform
 
+- **Hooks and status renders start faster.** A hook no longer loads doctor,
+  the installer, the history import or the analysis code; only the commands
+  that use them do. On Windows a hook's median time fell from 174 ms to
+  122 ms, and sixteen hooks at once from 2.3 s to 1.6 s each.
 - **Fixed: a source install could point every agent's hooks into a temporary
   folder.** Every hook and status line embeds the path of the installed CLI.
   `INSTALL.md` recommended `npm install -g .`, which installs a link to the
@@ -740,6 +788,9 @@ has a regression test that fails without its fix.
 
 ### Codex
 
+- **The Codex notify relay starts the notifier it displaced without a
+  console window.** On Windows it flashed a window on every Codex turn. Every
+  process Tokenwatch starts in the background is now held to this by a test.
 - **Fixed: every instruction for running a skill used Claude Code's syntax.**
   The README, the install output and the skills' hand-offs to one another all
   said `/tw-…`, which Codex does not recognise; Codex takes `$tw-…` or its

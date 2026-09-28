@@ -7,12 +7,13 @@ import path from 'node:path';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { claudeCommands, install } from '../src/installer.mjs';
+import { claudeCommands, install, installKey } from '../src/installer.mjs';
 import { readRelayRecord, recordRelayOutcome } from '../src/relay-record.mjs';
 import { claudeCommandChecks, collectionLiveness, runDoctor } from '../src/doctor.mjs';
 import { makeEvent } from '../src/schema.mjs';
 import { appendImportedEvents, sessionStateFile, storeEvent } from '../src/store.mjs';
 import { markImportRunsUndone, writeImportRun } from '../src/import/runs.mjs';
+import { claudeShell } from '../src/spawn.mjs';
 import { tempDir, testConfig } from './helpers.mjs';
 
 function installCopilot(root, config) {
@@ -197,6 +198,12 @@ function userScopeClaude(root) {
 
 const check = (report, id) => report.checks.find((entry) => entry.id === id);
 
+// The install key a project record is filed under, and so the prefix of every
+// check doctor emits for it, by install's own rule. On Windows that rule
+// case-folds the path, so one project reached by two spellings is one record;
+// the path as the test spelled it is not the key there.
+const projectKey = (dir) => installKey('project', dir);
+
 // The first Windows install, replayed: a project's shared settings file carried
 // another tool's status line, which outranks the user file Tokenwatch installed
 // into. Hooks kept firing - 15 events, 0 turns - so the ledger looked alive,
@@ -244,7 +251,7 @@ test('doctor names the repair when a project install\'s own status line no longe
   delete settings.statusLine;
   fs.writeFileSync(local, JSON.stringify(settings));
   fs.writeFileSync(shared, JSON.stringify({ statusLine: { type: 'command', command: 'late-tool --secret' } }));
-  const shadow = check(runDoctor(config, config.installStateFile, { projectDir: project, homeDir: path.join(root, 'home') }), `project:${project}:claude-status-line`);
+  const shadow = check(runDoctor(config, config.installStateFile, { projectDir: project, homeDir: path.join(root, 'home') }), `${projectKey(project)}:claude-status-line`);
   assert.equal(shadow?.status, 'warn', JSON.stringify(shadow));
   assert.ok(shadow.detail.includes(`To run both in that project: tokenwatch install --agents claude --scope project --project "${project}" --repair (uninstall`), shadow.detail);
   assert.doesNotMatch(shadow.detail, /late-tool|secret/);
@@ -263,7 +270,7 @@ test('with no status line set anywhere, doctor names the reinstall for the insta
   const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
   delete settings.statusLine;
   fs.writeFileSync(file, JSON.stringify(settings));
-  const project = check(runDoctor(config, config.installStateFile, { projectDir: root, homeDir: home }), `project:${root}:claude-status-line`);
+  const project = check(runDoctor(config, config.installStateFile, { projectDir: root, homeDir: home }), `${projectKey(root)}:claude-status-line`);
   assert.equal(project?.status, 'warn', JSON.stringify(project));
   assert.ok(project.detail.endsWith(`Run: tokenwatch install --agents claude --scope project --project "${root}" --force`), project.detail);
   assert.doesNotMatch(project.detail, /Reinstall with/);
@@ -291,13 +298,13 @@ test('doctor reports a settings file refused at install, naming the file, the re
   fs.writeFileSync(paths(root).copilotConfig, '[1]\n');
   install(config, options(root, { agents: 'claude,copilot' }));
   const report = runDoctor(config, config.installStateFile, { projectDir: root, homeDir: path.join(root, 'home') });
-  const claude = check(report, `project:${root}:claude-settings`);
+  const claude = check(report, `${projectKey(root)}:claude-settings`);
   assert.equal(claude?.status, 'warn', JSON.stringify(report.checks.filter((entry) => entry.id.includes('settings'))));
   assert.ok(claude.detail.includes(paths(root).claudeSettings), claude.detail);
   assert.match(claude.detail, /it does not parse as JSON/);
   assert.match(claude.detail, /no hooks, status line or skills/);
   assert.ok(claude.detail.endsWith(`Run: tokenwatch install --agents claude --scope project --project "${root}" --force`), claude.detail);
-  const copilot = check(report, `project:${root}:copilot-settings`);
+  const copilot = check(report, `${projectKey(root)}:copilot-settings`);
   assert.equal(copilot?.status, 'warn', JSON.stringify(copilot));
   assert.match(copilot.detail, /does not hold a JSON object at its top level/);
   assert.ok(copilot.detail.endsWith(`Run: tokenwatch install --agents copilot --scope project --project "${root}" --force`), copilot.detail);
@@ -316,9 +323,9 @@ test('a settings file refused at install is not reported OK by the file checks',
   install(config, options(root, { agents: 'claude,copilot' }));
   const report = runDoctor(config, config.installStateFile, { projectDir: root, homeDir: path.join(root, 'home') });
   for (const [id, agent] of [['claudeSettings', 'claude'], ['copilotConfig', 'copilot']]) {
-    const file = check(report, `project:${root}:${id}`);
+    const file = check(report, `${projectKey(root)}:${id}`);
     assert.notEqual(file?.status, 'ok', JSON.stringify(file));
-    assert.ok(file.detail.includes(`project:${root}:${agent}-settings`), file.detail);
+    assert.ok(file.detail.includes(`${projectKey(root)}:${agent}-settings`), file.detail);
   }
 });
 
@@ -330,7 +337,7 @@ test('an agent whose settings file was refused is reported as not collecting, no
   const collection = check(runDoctor(config, config.installStateFile, { projectDir: root, homeDir: path.join(root, 'home') }), 'collection:claude');
   assert.equal(collection?.status, 'warn', JSON.stringify(collection));
   assert.doesNotMatch(collection.detail, /Run a session|check again/, collection.detail);
-  assert.ok(collection.detail.includes(`project:${root}:claude-settings`), collection.detail);
+  assert.ok(collection.detail.includes(`${projectKey(root)}:claude-settings`), collection.detail);
 });
 
 test('shared skills installed for Codex beside a refused Copilot do not tell Copilot users how to run them', () => {
@@ -338,7 +345,7 @@ test('shared skills installed for Codex beside a refused Copilot do not tell Cop
   const config = testConfig(path.join(root, 'state'));
   fs.writeFileSync(paths(root).copilotConfig, '[1]\n');
   install(config, options(root, { agents: 'copilot,codex', sharedSkills: path.join(root, '.agents', 'skills') }));
-  const shared = check(runDoctor(config, config.installStateFile), `project:${root}:shared-skills`);
+  const shared = check(runDoctor(config, config.installStateFile), `${projectKey(root)}:shared-skills`);
   assert.equal(shared?.status, 'ok', JSON.stringify(shared));
   assert.match(shared.detail, /\$tw-<name>/, 'Codex is still told');
   assert.doesNotMatch(shared.detail, /Copilot CLI type/, shared.detail);
@@ -383,9 +390,9 @@ test('the reinstall doctor names for a changed skill or an old hook file is the 
   document.hooks.preToolUse = document.hooks.postToolUse;
   fs.writeFileSync(hooksFile, JSON.stringify(document));
   const report = runDoctor(config, config.installStateFile, { projectDir: root, homeDir: path.join(root, 'home') });
-  const modified = check(report, `project:${root}:claude:tw-explain-statusline:modified`);
+  const modified = check(report, `${projectKey(root)}:claude:tw-explain-statusline:modified`);
   assert.ok(modified?.detail.endsWith(`tokenwatch install --agents claude --scope project --project "${root}" --force`), JSON.stringify(modified));
-  const failClosed = check(report, `project:${root}:copilot-fail-closed-hooks`);
+  const failClosed = check(report, `${projectKey(root)}:copilot-fail-closed-hooks`);
   assert.ok(failClosed?.detail.endsWith(`tokenwatch install --agents copilot --scope project --project "${root}" --force`), JSON.stringify(failClosed));
 });
 
@@ -725,10 +732,10 @@ test('a recorded script in a temporary folder names the reinstall for its own in
   const project = path.join(root, 'project');
   fs.mkdirSync(path.dirname(config.installStateFile), { recursive: true });
   fs.writeFileSync(config.installStateFile, JSON.stringify({ version: 1, installs: {
-    [`project:${project}`]: { scope: 'project', project, agents: ['claude', 'codex'],
+    [projectKey(project)]: { scope: 'project', project, agents: ['claude', 'codex'],
       claude: { statusCommand: `'${process.execPath}' '${file}' status --agent claude --ingest-stdin`, hooks: [] } }
   } }));
-  const recorded = runDoctor(config, config.installStateFile).checks.find((entry) => entry.id === `project:${project}:install-location`);
+  const recorded = runDoctor(config, config.installStateFile).checks.find((entry) => entry.id === `${projectKey(project)}:install-location`);
   assert.equal(recorded?.status, 'warn', JSON.stringify(recorded));
   assert.ok(recorded.detail.endsWith(`re-run \`tokenwatch install --agents claude,codex --scope project --project "${project}" --force\` from that copy.`), recorded.detail);
 });
@@ -776,6 +783,124 @@ test('doctor reports a Copilot hook command that fails in its shell before the a
   assert.doesNotMatch(failed.detail, /tokenwatch\.mjs/, 'the detail names the event, not the command text');
   assert.equal(report.ok, false, 'a hook that cannot run fails doctor');
   assert.equal(report.checks.some((check) => check.id.endsWith(':copilot-hooks-run') && check.status === 'ok'), false);
+});
+
+// doctor starts one shell for every Copilot hook, where Copilot starts one per
+// hook, so one hook must not be able to change what doctor says about another.
+// Joined into one script, a hook that exited ended the script and the hooks
+// after it were blamed; one that did not parse took the rest with it; one that
+// hung was measured against the sum of every hook's limit; and a second entry
+// for an event hid behind the first one's marker. Each case breaks one hook,
+// subagentStart, in the middle of the file, and doctor must name that hook and
+// no other, with the problem a shell of its own reports, as Copilot would see.
+function editCopilotHooks(root, config, edit) {
+  const hooksFile = installCopilot(root, config);
+  const document = JSON.parse(fs.readFileSync(hooksFile, 'utf8'));
+  edit(document.hooks);
+  fs.writeFileSync(hooksFile, JSON.stringify(document));
+}
+
+const failedCopilotHooks = (report) => report.checks.filter((entry) => entry.id.includes(':copilot-hook:')).map((entry) => entry.id.split(':').at(-1));
+
+test('a Copilot hook that overruns its own time limit is reported as timed out, whatever the other hooks allow', () => {
+  const root = tempDir();
+  const config = testConfig(path.join(root, 'state'));
+  editCopilotHooks(root, config, (hooks) => {
+    const [entry] = hooks.subagentStart;
+    entry.timeoutSec = 1;
+    entry.bash = `sleep 2; ${entry.bash}`;
+    entry.powershell = `Start-Sleep -Seconds 2; ${entry.powershell}`;
+  });
+  const report = runDoctor(config, config.installStateFile);
+  assert.deepEqual(failedCopilotHooks(report), ['subagentStart'], JSON.stringify(report.checks.filter((entry) => entry.id.includes('copilot-hook'))));
+  assert.match(check(report, `${projectKey(root)}:copilot-hook:subagentStart`).detail, /^the subagentStart hook timed out after 1s under /);
+  assert.equal(report.ok, false);
+});
+
+test('a Copilot hook that exits non-zero is the one named, not the hooks after it', () => {
+  const root = tempDir();
+  const config = testConfig(path.join(root, 'state'));
+  editCopilotHooks(root, config, (hooks) => {
+    const [entry] = hooks.subagentStart;
+    entry.bash = `${entry.bash}; exit 7`;
+    entry.powershell = `${entry.powershell}; exit 7`;
+  });
+  const report = runDoctor(config, config.installStateFile);
+  assert.deepEqual(failedCopilotHooks(report), ['subagentStart'], JSON.stringify(report.checks.filter((entry) => entry.id.includes('copilot-hook'))));
+  assert.match(check(report, `${projectKey(root)}:copilot-hook:subagentStart`).detail, /^the subagentStart hook exited 7 under /);
+});
+
+test('a broken second entry for an event is named, though the first entry for it reaches Tokenwatch', () => {
+  const root = tempDir();
+  const config = testConfig(path.join(root, 'state'));
+  editCopilotHooks(root, config, (hooks) => {
+    const [entry] = hooks.subagentStart;
+    hooks.subagentStart.push({ ...entry, bash: entry.bash.slice(0, -1), powershell: entry.powershell.slice(0, -1) });
+  });
+  const report = runDoctor(config, config.installStateFile);
+  assert.deepEqual(failedCopilotHooks(report), ['subagentStart'], JSON.stringify(report.checks.filter((entry) => entry.id.includes('copilot-hook'))));
+  assert.match(check(report, `${projectKey(root)}:copilot-hook:subagentStart`).detail, /^the subagentStart hook exited \d+ under /);
+});
+
+test('a Copilot hook that ends its shell with exit 0 after reaching Tokenwatch passes, and no other hook is blamed', () => {
+  const root = tempDir();
+  const config = testConfig(path.join(root, 'state'));
+  editCopilotHooks(root, config, (hooks) => {
+    const [entry] = hooks.subagentStart;
+    entry.bash = `${entry.bash}; exit 0`;
+    entry.powershell = `${entry.powershell}; exit 0`;
+  });
+  const report = runDoctor(config, config.installStateFile);
+  assert.deepEqual(failedCopilotHooks(report), [], JSON.stringify(report.checks.filter((entry) => entry.id.includes('copilot-hook'))));
+  assert.equal(check(report, `${projectKey(root)}:copilot-hooks-run`)?.status, 'ok');
+});
+
+// PowerShell has no exec; there the hook is simply healthy.
+test('a Copilot hook that replaces its shell with exec blames no other hook', () => {
+  const root = tempDir();
+  const config = testConfig(path.join(root, 'state'));
+  editCopilotHooks(root, config, (hooks) => {
+    const [entry] = hooks.subagentStart;
+    entry.bash = `exec ${entry.bash}`;
+  });
+  const report = runDoctor(config, config.installStateFile);
+  assert.deepEqual(failedCopilotHooks(report), [], JSON.stringify(report.checks.filter((entry) => entry.id.includes('copilot-hook'))));
+  assert.equal(check(report, `${projectKey(root)}:copilot-hooks-run`)?.status, 'ok');
+});
+
+test('a Copilot hook that does not parse fails alone, not every hook after it', () => {
+  const root = tempDir();
+  const config = testConfig(path.join(root, 'state'));
+  editCopilotHooks(root, config, (hooks) => {
+    const [entry] = hooks.subagentStart;
+    entry.bash = entry.bash.slice(0, -1);
+    entry.powershell = entry.powershell.slice(0, -1);
+  });
+  const report = runDoctor(config, config.installStateFile);
+  assert.deepEqual(failedCopilotHooks(report), ['subagentStart'], JSON.stringify(report.checks.filter((entry) => entry.id.includes('copilot-hook'))));
+  assert.match(check(report, `${projectKey(root)}:copilot-hook:subagentStart`).detail, /^the subagentStart hook exited \d+ under /);
+});
+
+// The point of one shell: ten PowerShell starts were about 9 s of a 16 s
+// doctor on Windows. Each hook here also writes the id of the shell process
+// running it (`$$` is the shell's own id in Bash, subshells included), so the
+// file shows how many shells doctor started for ten healthy hooks.
+test('doctor probes every healthy Copilot hook through one shell start', () => {
+  const root = tempDir();
+  const config = testConfig(path.join(root, 'state'));
+  const log = path.join(root, 'hook-shells.log');
+  editCopilotHooks(root, config, (hooks) => {
+    for (const [entry] of Object.values(hooks)) {
+      entry.bash = `echo $$ >> '${log}'; ${entry.bash}`;
+      entry.powershell = `Add-Content -LiteralPath '${log}' -Value $PID; ${entry.powershell}`;
+    }
+  });
+  const report = runDoctor(config, config.installStateFile);
+  assert.deepEqual(failedCopilotHooks(report), [], JSON.stringify(report.checks.filter((entry) => entry.id.includes('copilot-hook'))));
+  assert.match(check(report, `${projectKey(root)}:copilot-hooks-run`)?.detail ?? '', /^10 Copilot hook command\(s\) ran through/);
+  const shells = fs.readFileSync(log, 'utf8').trim().split(/\r?\n/);
+  assert.equal(shells.length, 10, `every hook ran once: ${shells.join(',')}`);
+  assert.equal(new Set(shells).size, 1, `one shell for all ten: ${[...new Set(shells)].join(',')}`);
 });
 
 // Probe mode is honoured only by this CLI. A hook left by another Tokenwatch -
@@ -828,6 +953,21 @@ test('doctor says a missing hook shell was not checked rather than failing', () 
 // a command that shell cannot parse records nothing and nothing else notices.
 const THIS_CLI = fileURLToPath(new URL('../bin/tokenwatch.mjs', import.meta.url));
 
+// The shell doctor probes Claude Code's commands through here, by the name it
+// reports: /bin/sh off Windows; on Windows Git Bash where installed, else
+// PowerShell, because that is the shell Claude Code itself would use there.
+const CLAUDE_SHELL_NAME = { posix: '/bin/sh', bash: 'Git Bash', powershell: 'PowerShell' }[claudeShell().shell];
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// This environment with its search path replaced. On Windows the variable is
+// `Path`, and a copy of process.env with `PATH` added beside it holds both, so
+// the old path stays in reach of whichever spelling a lookup finds first.
+function envWithPath(value) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PATH'));
+  env.PATH = value;
+  return env;
+}
+
 function installClaudeHere(root, config) {
   install(config, options(root));
   return paths(root).claudeSettings;
@@ -868,7 +1008,7 @@ test('doctor runs each installed Claude Code command through its shell and store
   const hooksRun = report.checks.find((check) => check.id.endsWith(':claude-hooks-run'));
   const statusRun = report.checks.find((check) => check.id.endsWith(':claude-status-run'));
   assert.equal(hooksRun?.status, 'ok', `hooks: ${JSON.stringify(hooksRun)}`);
-  assert.match(hooksRun.detail, /^7 Claude Code hook command\(s\) ran through \/bin\/sh/, hooksRun.detail);
+  assert.match(hooksRun.detail, new RegExp(`^7 Claude Code hook command\\(s\\) ran through ${escapeRegExp(CLAUDE_SHELL_NAME)} `), hooksRun.detail);
   assert.equal(statusRun?.status, 'ok', `status line: ${JSON.stringify(statusRun)}`);
   assert.match(statusRun.detail, /received its 2-byte stdin intact/, statusRun.detail);
   assert.equal(report.ok, true, JSON.stringify(report.checks.filter((check) => check.status === 'error')));
@@ -890,7 +1030,7 @@ test('doctor reports a Claude Code command that fails in its shell before the ag
   const failed = report.checks.find((check) => check.id.endsWith(':claude-hook:Stop'));
   const status = report.checks.find((check) => check.id.endsWith(':claude-status-run'));
   assert.equal(failed?.status, 'error', JSON.stringify(report.checks.filter((check) => check.id.includes('claude-'))));
-  assert.match(failed.detail, / under \/bin\/sh before Tokenwatch could record anything/, failed.detail);
+  assert.match(failed.detail, new RegExp(` under ${escapeRegExp(CLAUDE_SHELL_NAME)} before Tokenwatch could record anything`), failed.detail);
   assert.equal(status?.status, 'error', JSON.stringify(status));
   for (const detail of [failed.detail, status.detail]) {
     assert.doesNotMatch(detail, /tokenwatch\.mjs/, 'the detail names the event, not the command text');
@@ -1069,7 +1209,7 @@ test('doctor resolves a bare node on PATH and runs the Windows command form thro
   const windows = claudeCommands({ cli: THIS_CLI, platform: 'win32' });
   rewriteClaudeCommands(root, config, { hook: (eventName) => windows.hooks[eventName], status: () => windows.status });
   const nodeDir = path.dirname(process.execPath);
-  const withNode = { ...process.env, PATH: `${nodeDir}${path.delimiter}/usr/bin${path.delimiter}/bin` };
+  const withNode = envWithPath(`${nodeDir}${path.delimiter}/usr/bin${path.delimiter}/bin`);
 
   const report = runDoctor(config, config.installStateFile, { env: withNode });
   assert.equal(report.checks.some((check) => check.id.endsWith(':executable')), false,
@@ -1077,7 +1217,7 @@ test('doctor resolves a bare node on PATH and runs the Windows command form thro
   assert.equal(report.checks.find((check) => check.id.endsWith(':claude-hooks-run'))?.status, 'ok');
   assert.equal(report.checks.find((check) => check.id.endsWith(':claude-status-run'))?.status, 'ok');
 
-  const withoutNode = { ...process.env, PATH: tempDir('tokenwatch-no-node-') };
+  const withoutNode = envWithPath(tempDir('tokenwatch-no-node-'));
   const missing = runDoctor(config, config.installStateFile, { env: withoutNode })
     .checks.find((check) => check.id.endsWith(':executable'));
   assert.equal(missing?.status, 'error', 'a node that is nowhere on PATH is reported');
@@ -1303,7 +1443,7 @@ test('doctor reports a composed status line whose source command changed since i
   const config = testConfig(path.join(root, 'state'));
   const { project, shared, local } = composedProject(root);
   install(config, { agents: 'claude', scope: 'project', project, homeDir: path.join(root, 'home'), claudeSettings: local, claudeSkills: path.join(project, '.claude', 'skills'), compose: true });
-  const key = `project:${project}`;
+  const key = projectKey(project);
   const composeCheck = () => runDoctor(config, config.installStateFile).checks.find((check) => check.id === `${key}:claude-status-compose`);
 
   assert.equal(composeCheck()?.status, 'ok', JSON.stringify(composeCheck()));
@@ -1323,7 +1463,7 @@ test('doctor reports a composed record edited by hand and a recorded Git Bash th
   const config = testConfig(path.join(root, 'state'));
   const { project, local } = composedProject(root);
   install(config, { agents: 'claude', scope: 'project', project, homeDir: path.join(root, 'home'), claudeSettings: local, claudeSkills: path.join(project, '.claude', 'skills'), compose: true });
-  const key = `project:${project}`;
+  const key = projectKey(project);
   const edit = (change) => {
     const state = JSON.parse(fs.readFileSync(config.installStateFile, 'utf8'));
     change(state.installs[key].claude.compose[0]);
@@ -1345,7 +1485,7 @@ test('doctor reports every composed entry in one check, naming the one that drif
   const config = testConfig(path.join(root, 'state'));
   const { project, shared, local } = composedProject(root);
   install(config, { agents: 'claude', scope: 'project', project, homeDir: path.join(root, 'home'), claudeSettings: local, claudeSkills: path.join(project, '.claude', 'skills'), compose: true });
-  const key = `project:${project}`;
+  const key = projectKey(project);
   const state = JSON.parse(fs.readFileSync(config.installStateFile, 'utf8'));
   const [first] = state.installs[key].claude.compose;
   const second = { ...first, command: 'second-tool --token-in-argv', sha256: crypto.createHash('sha256').update('second-tool --token-in-argv').digest('hex') };
@@ -1389,7 +1529,7 @@ test('doctor never calls a composed record healthy that the render refuses to ru
   const config = testConfig(path.join(root, 'state'));
   const { project, local } = composedProject(root);
   install(config, { agents: 'claude', scope: 'project', project, homeDir: path.join(root, 'home'), claudeSettings: local, claudeSkills: path.join(project, '.claude', 'skills'), compose: true });
-  const key = `project:${project}`;
+  const key = projectKey(project);
   const state = JSON.parse(fs.readFileSync(config.installStateFile, 'utf8'));
   state.installs[key].claude.compose[0].shell = 'bash';
   delete state.installs[key].claude.compose[0].shellPath;
@@ -1538,7 +1678,7 @@ test('shared skills where Codex does not look name the reinstall for their own p
   const root = tempDir();
   const config = testConfig(path.join(root, 'state'));
   install(config, options(root, { agents: 'codex' }));
-  const misplaced = check(runDoctor(config, config.installStateFile), `project:${root}:shared-skills:location`);
+  const misplaced = check(runDoctor(config, config.installStateFile), `${projectKey(root)}:shared-skills:location`);
   assert.ok(misplaced?.detail.endsWith(`Reinstall without --shared-skills: ${projectReinstall(root, 'codex')}`), JSON.stringify(misplaced));
 });
 
@@ -1549,7 +1689,7 @@ test('a shared skill Codex would skip names the reinstall for its own project', 
   install(config, options(root, { agents: 'codex', sharedSkills: shared }));
   const file = path.join(shared, 'tw-retrospective-this-session', 'SKILL.md');
   fs.writeFileSync(file, `﻿${fs.readFileSync(file, 'utf8')}`);
-  const skipped = check(runDoctor(config, config.installStateFile), `project:${root}:shared:tw-retrospective-this-session:codex`);
+  const skipped = check(runDoctor(config, config.installStateFile), `${projectKey(root)}:shared:tw-retrospective-this-session:codex`);
   assert.ok(skipped?.detail.endsWith(`Reinstall the bundled text with: ${projectReinstall(root, 'codex')}`), JSON.stringify(skipped));
 });
 
@@ -1558,7 +1698,7 @@ test('an edited shared skill names the reinstall for its own project and every a
   const config = testConfig(path.join(root, 'state'));
   install(config, options(root, { agents: 'copilot,codex' }));
   fs.appendFileSync(path.join(paths(root).sharedSkills, 'tw-explain-statusline', 'SKILL.md'), '\nedited\n');
-  const modified = check(runDoctor(config, config.installStateFile), `project:${root}:shared:tw-explain-statusline:modified`);
+  const modified = check(runDoctor(config, config.installStateFile), `${projectKey(root)}:shared:tw-explain-statusline:modified`);
   assert.ok(modified?.detail.endsWith(projectReinstall(root, 'copilot,codex')), JSON.stringify(modified));
 });
 
@@ -1571,7 +1711,7 @@ test('a Copilot hook that fails in its shell names the reinstall for its own pro
   entry.bash = entry.bash.slice(0, -1);
   entry.powershell = entry.powershell.slice(0, -1);
   fs.writeFileSync(hooksFile, JSON.stringify(document));
-  const failed = check(runDoctor(config, config.installStateFile), `project:${root}:copilot-hook:sessionStart`);
+  const failed = check(runDoctor(config, config.installStateFile), `${projectKey(root)}:copilot-hook:sessionStart`);
   assert.equal(failed?.status, 'error', JSON.stringify(failed));
   assert.ok(failed.detail.endsWith(`Reinstall with: ${projectReinstall(root, 'copilot')}`), failed.detail);
 });
@@ -1580,8 +1720,11 @@ test('a Copilot status line that fails in its shell names the reinstall for its 
   const root = tempDir();
   const config = testConfig(path.join(root, 'state'));
   installCopilot(root, config);
-  rewriteCopilotStatus(root, config, (command) => command.slice(0, -1));
-  const failed = check(runDoctor(config, config.installStateFile), `project:${root}:copilot-status-run`);
+  // A pipe with nothing after it: a syntax error for /bin/sh and cmd.exe alike.
+  // Dropping the closing quote, as the hook case does, is not one for cmd.exe,
+  // which runs a line whose last quote is unterminated, so Copilot would too.
+  rewriteCopilotStatus(root, config, (command) => `${command} |`);
+  const failed = check(runDoctor(config, config.installStateFile), `${projectKey(root)}:copilot-status-run`);
   assert.equal(failed?.status, 'error', JSON.stringify(failed));
   assert.ok(failed.detail.endsWith(`Reinstall with: ${projectReinstall(root, 'copilot')}`), failed.detail);
 });
@@ -1597,7 +1740,7 @@ test('Copilot hooks from a different Tokenwatch name the reinstall for their own
     entry.powershell = `& '${process.execPath}' '${older}' 'hook' 'copilot' '${eventName}'`;
   }
   fs.writeFileSync(hooksFile, JSON.stringify(document));
-  const foreign = check(runDoctor(config, config.installStateFile), `project:${root}:copilot-hooks-run`);
+  const foreign = check(runDoctor(config, config.installStateFile), `${projectKey(root)}:copilot-hooks-run`);
   assert.equal(foreign?.status, 'warn', JSON.stringify(foreign));
   assert.ok(foreign.detail.endsWith(`Reinstall with this version to check them: ${projectReinstall(root, 'copilot')}`), foreign.detail);
   assert.equal(fs.existsSync(path.join(root, 'older-ran')), false);
@@ -1609,7 +1752,7 @@ test('a Copilot status line from a different Tokenwatch names the reinstall for 
   installCopilot(root, config);
   const older = olderTokenwatch(root);
   rewriteCopilotStatus(root, config, () => `'${process.execPath}' '${older}' 'status' '--agent' 'copilot' '--ingest-stdin'`);
-  const foreign = check(runDoctor(config, config.installStateFile), `project:${root}:copilot-status-run`);
+  const foreign = check(runDoctor(config, config.installStateFile), `${projectKey(root)}:copilot-status-run`);
   assert.equal(foreign?.status, 'warn', JSON.stringify(foreign));
   assert.ok(foreign.detail.endsWith(`Reinstall with this version to check them: ${projectReinstall(root, 'copilot')}`), foreign.detail);
   assert.equal(fs.existsSync(path.join(root, 'older-ran')), false);
@@ -1621,7 +1764,7 @@ test('Claude Code hooks from a different Tokenwatch name the reinstall for their
   installClaudeHere(root, config);
   const older = olderTokenwatch(root);
   rewriteClaudeCommands(root, config, { hook: (eventName) => `'${process.execPath}' '${older}' 'hook' 'claude' '${eventName}'` });
-  const foreign = check(runDoctor(config, config.installStateFile), `project:${root}:claude-hooks-run`);
+  const foreign = check(runDoctor(config, config.installStateFile), `${projectKey(root)}:claude-hooks-run`);
   assert.equal(foreign?.status, 'warn', JSON.stringify(foreign));
   assert.ok(foreign.detail.endsWith(`Reinstall with this version to check them: ${projectReinstall(root, 'claude')}`), foreign.detail);
   assert.equal(fs.existsSync(path.join(root, 'older-ran')), false);
@@ -1633,7 +1776,7 @@ test('a Claude Code status line from a different Tokenwatch names the reinstall 
   installClaudeHere(root, config);
   const older = olderTokenwatch(root);
   rewriteClaudeCommands(root, config, { status: () => `'${process.execPath}' '${older}' 'status' '--agent' 'claude' '--ingest-stdin'` });
-  const foreign = check(runDoctor(config, config.installStateFile), `project:${root}:claude-status-run`);
+  const foreign = check(runDoctor(config, config.installStateFile), `${projectKey(root)}:claude-status-run`);
   assert.equal(foreign?.status, 'warn', JSON.stringify(foreign));
   assert.ok(foreign.detail.endsWith(`Reinstall with this version to check them: ${projectReinstall(root, 'claude')}`), foreign.detail);
   assert.equal(fs.existsSync(path.join(root, 'older-ran')), false);
@@ -1645,7 +1788,7 @@ test('a notify line that no longer runs the relay names the reinstall for its ow
   install(config, options(root, { agents: 'codex' }));
   const file = paths(root).codexConfig;
   fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/^notify = .*$/m, 'notify = ["/usr/bin/other-notifier"]'));
-  const replaced = check(runDoctor(config, config.installStateFile, { projectDir: root }), `project:${root}:codex-notify`);
+  const replaced = check(runDoctor(config, config.installStateFile, { projectDir: root }), `${projectKey(root)}:codex-notify`);
   assert.equal(replaced?.status, 'warn', JSON.stringify(replaced));
   assert.ok(replaced.detail.endsWith(`Reinstall with: ${projectReinstall(root, 'codex')}`), replaced.detail);
 });
@@ -1659,11 +1802,11 @@ test('a recorded executable that is no longer executable names the reinstall for
   const project = path.join(root, 'project');
   fs.mkdirSync(path.dirname(config.installStateFile), { recursive: true });
   fs.writeFileSync(config.installStateFile, JSON.stringify({ version: 1, installs: {
-    [`project:${project}`]: { scope: 'project', project, agents: ['claude', 'codex'],
+    [projectKey(project)]: { scope: 'project', project, agents: ['claude', 'codex'],
       claude: { statusCommand: `'${node}' '${THIS_CLI}' status --agent claude --ingest-stdin`, hooks: [] },
       codex: { notifyLine: `notify = ${JSON.stringify([node, THIS_CLI, 'notify-relay', '--agent', 'codex'])}` } }
   } }));
-  const gone = check(runDoctor(config, config.installStateFile), `project:${project}:executable`);
+  const gone = check(runDoctor(config, config.installStateFile), `${projectKey(project)}:executable`);
   assert.equal(gone?.status, 'error', JSON.stringify(gone));
   assert.ok(gone.detail.endsWith(`Re-run: ${projectReinstall(project, 'claude,codex')}`), gone.detail);
 });

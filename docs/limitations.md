@@ -1,5 +1,9 @@
 # Known limitations
 
+- Not live-tested for this release: Codex CLI on any operating system, and
+  any agent on macOS, where only Tokenwatch's own test suite runs (in CI).
+  Claude Code and GitHub Copilot CLI were run hands-on on Linux and Windows;
+  `docs/support-matrix.json` records what each run covered and what it did not.
 - Agent interfaces do not expose identical metrics. A lifecycle stop event is
   not assumed to be a billing event.
 - `tokenwatch import` fills in history from an agent's session files, and that

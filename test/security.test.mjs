@@ -14,6 +14,7 @@ import { eventsToCsv } from '../src/export.mjs';
 import { normalizeOtlp } from '../src/normalize/index.mjs';
 import { decodeOtlpLogsExportRequest } from '../src/otlp-protobuf.mjs';
 import { loadState, sessionStateFile } from '../src/store.mjs';
+import { identityPath } from '../src/fs-util.mjs';
 import { symlinkUnavailable, tempDir, testConfig } from './helpers.mjs';
 
 function paths(root) {
@@ -115,7 +116,7 @@ test('a notifier the installer declined to replace is never recorded', () => {
   assert.equal(record.codex.notifyLine, undefined, 'nothing was installed');
   assert.equal(record.codex.priorNotifyLine, undefined, 'so nothing may be remembered to run');
   assert.ok(record.codex.warning, 'the user is told the file was left alone');
-  assert.equal(priorCodexNotify(config, 'project:' + root), null);
+  assert.equal(priorCodexNotify(config, `project:${identityPath(root)}`), null);
 });
 
 test('a displaced notifier is relayed only for a user-scope install', () => {
@@ -125,7 +126,7 @@ test('a displaced notifier is relayed only for a user-scope install', () => {
   install(config, { agents: 'codex', scope: 'user', ...paths(root), force: true });
   assert.deepEqual(priorCodexNotify(config, 'user'), ['/usr/bin/my-notifier', '--flag']);
   // Scoped: another installation's notification must not reach this notifier.
-  assert.equal(priorCodexNotify(config, `project:${root}`), null);
+  assert.equal(priorCodexNotify(config, `project:${identityPath(root)}`), null);
   assert.equal(priorCodexNotify(config, undefined), null);
 });
 
@@ -142,7 +143,7 @@ test('a notifier displaced from a checkout is restored but never executed', () =
   const record = install(config, options(root, { force: true }));
 
   assert.ok(record.codex.priorNotifyLine, 'the displaced line is remembered for restore');
-  assert.equal(priorCodexNotify(config, `project:${root}`), null, 'but it is never handed to spawn');
+  assert.equal(priorCodexNotify(config, `project:${identityPath(root)}`), null, 'but it is never handed to spawn');
 
   uninstall(config, { scope: 'project', project: root });
   assert.equal(fs.readFileSync(paths(root).codexConfig, 'utf8'), original,
@@ -163,7 +164,7 @@ test('the relay is never recorded as its own predecessor', () => {
   fs.rmSync(config.installStateFile, { force: true });
   const again = install(config, options(root, { force: true }));
   assert.equal(again.codex.priorNotifyLine, undefined, 'our own relay is not a predecessor');
-  assert.equal(priorCodexNotify(config, `project:${root}`), null, 'so nothing is spawned');
+  assert.equal(priorCodexNotify(config, `project:${identityPath(root)}`), null, 'so nothing is spawned');
 });
 
 // The relay line exactly as Tokenwatch writes it on Windows. `tomlArray`

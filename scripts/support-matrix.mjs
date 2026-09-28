@@ -84,7 +84,7 @@ export function renderSupportMatrix(data) {
   }
   lines.push('',
     `**CI.** The \`${ci.workflow}\` workflow runs on ${ci.matrix}. It last passed on ${ci.lastGreen} (commit \`${ci.lastGreenCommit}\`, in ${ci.where}). `
-      + `It has not run since ${ci.notRunningSince}: ${ci.why}.`,
+      + (ci.notRunningSince ? `It has not run since ${ci.notRunningSince}: ${ci.why}.` : (ci.latest ?? '')),
     '');
   for (const note of data.notes) lines.push(`- ${note}`);
   lines.push('', '**Evidence per cell:**', '');

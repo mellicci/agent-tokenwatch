@@ -17,7 +17,8 @@
 // already recording and printing: running it again would print its rows twice.
 //
 // Every path exits 0: a status line must render whatever its parts do.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import path from 'node:path';
 
 // Your status commands, in the order their rows should appear. `shell` is how
 // each line is run: 'posix' (sh on macOS and Linux, cmd.exe on Windows), 'cmd',
@@ -79,9 +80,18 @@ function run(spec, bytes) {
       resolve({ child: undefined, done: Promise.resolve(Buffer.alloc(0)) });
       return;
     }
+    let release;
     const done = new Promise((finish) => {
       child.on('error', () => finish(Buffer.alloc(0)));
       child.on('close', () => finish(Buffer.concat(out, size)));
+      // After a timeout the output is discarded, so stop waiting for 'close':
+      // a program the shell started can hold the pipe open long after the
+      // shell itself is gone, and on Windows one the kill missed can too.
+      release = () => {
+        try { child.stdout.destroy(); } catch { /* already closed */ }
+        child.unref();
+        finish(Buffer.alloc(0));
+      };
     });
     child.stdout.on('data', (chunk) => {
       const room = MAX_OUTPUT_BYTES - size;
@@ -92,16 +102,39 @@ function run(spec, bytes) {
     });
     child.stdin.on('error', () => {});
     child.stdin.end(bytes);
-    resolve({ child, done });
+    resolve({ child, done, release });
   });
 }
 
-function kill(child) {
-  if (!child?.pid) return;
-  try {
-    if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL');
-    else child.kill('SIGKILL');
-  } catch { /* already gone */ }
+// Stops the commands still running, each with everything it started, all at
+// once. Off Windows each command runs in its own process group. On Windows
+// killing the shell leaves the program it started running, so the whole tree
+// goes through taskkill, found in the system folder rather than on PATH, run
+// once for all of them so the stop costs one 2 s bound, not one per command.
+//
+// A command is killed by its id only while Node has not seen it exit: until
+// then the id cannot belong to another program (an exited child stays a zombie
+// until Node reaps it; on Windows Node's handle keeps the id from being
+// reused). A shell that has exited while a program it started still holds the
+// pipe is not killed at all, because its id may already be an unrelated
+// program's, and taskkill /T would take that program's children too. Its pipe
+// is let go instead (see run), and the program it left behind runs until it
+// ends by itself or its next write to that pipe fails.
+function stop(children) {
+  const live = children.filter((child) => child?.pid && child.exitCode === null && child.signalCode === null);
+  if (!live.length) return;
+  if (process.platform !== 'win32') {
+    for (const child of live) {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    return;
+  }
+  const taskkill = path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32', 'taskkill.exe');
+  spawnSync(taskkill, ['/T', '/F', ...live.flatMap((child) => ['/PID', String(child.pid)])], { stdio: 'ignore', windowsHide: true, timeout: 2000 });
+  // Through Node's handle, not the id: once the shell has exited this does nothing.
+  for (const child of live) {
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  }
 }
 
 async function main() {
@@ -114,11 +147,10 @@ async function main() {
   runs.forEach((each, index) => each.done.then(() => { finished[index] = true; }));
   const stopped = runs.map(() => false);
   const timer = setTimeout(() => {
-    runs.forEach((each, index) => {
-      if (finished[index]) return;
-      stopped[index] = true;
-      kill(each.child);
-    });
+    const late = runs.filter((each, index) => !finished[index]);
+    runs.forEach((each, index) => { stopped[index] = !finished[index]; });
+    stop(late.map((each) => each.child));
+    for (const each of late) each.release?.();
   }, TIMEOUT_MS);
   const outputs = await Promise.all(runs.map(({ done }) => done));
   clearTimeout(timer);

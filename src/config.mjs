@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { CONFIG_VERSION, DEFAULT_OTLP_PORT } from './constants.mjs';
-import { atomicWriteJson, ensureDir, isWriteRefused, readJson, resolvePath } from './fs-util.mjs';
+import { atomicWriteJson, createJsonExclusively, ensureDir, isWriteRefused, readJsonSettled, resolvePath } from './fs-util.mjs';
 
 export function tokenwatchHome(env = process.env) {
   return resolvePath(env.TOKENWATCH_HOME || path.join(os.homedir(), '.tokenwatch'));
@@ -95,14 +95,23 @@ export function composeSettings(config) {
 
 export function loadConfig({ create = true, env = process.env } = {}) {
   const file = configPath(env);
-  const existing = readJson(file, null);
-  if (!existing) {
+  const isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  let existing = readJsonSettled(file, null);
+  if (!isObject(existing)) {
     const config = defaultConfig(env);
-    if (create) {
-      ensureDir(path.dirname(file));
+    if (!create) return { config: normalizeConfig(config, env), file, created: false };
+    ensureDir(path.dirname(file));
+    // Several hooks can start together on a fresh install. Only one may create
+    // the file; the others use what it wrote, so every process hashes projects
+    // with the one projectSalt that is kept.
+    if (existing === null && createJsonExclusively(file, config)) return { config: normalizeConfig(config, env), file, created: true };
+    existing = readJsonSettled(file, null);
+    if (!isObject(existing)) {
+      // A file that holds no settings at all (`null`, `false`, an array) is
+      // replaced, as it always was; otherwise every run would draw a new salt.
       atomicWriteJson(file, config);
+      return { config: normalizeConfig(config, env), file, created: true };
     }
-    return { config: normalizeConfig(config, env), file, created: create };
   }
   const config = mergeObject(defaultConfig(env), existing);
   if (!config.projectSalt) config.projectSalt = crypto.randomBytes(32).toString('hex');

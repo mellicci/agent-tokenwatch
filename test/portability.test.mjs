@@ -10,7 +10,7 @@ import { claudeCommands, copilotCommands, install, nodeOnPathWarning, recordedCo
 import { CLAUDE_HOOK_EVENTS, CODEX_WRAPPER_ENV, COPILOT_HOOK_EVENTS, PROBE_ENV, PROBE_MARKER } from '../src/constants.mjs';
 import { runDoctor } from '../src/doctor.mjs';
 import { claudeShell, findGitBash, quoteForCmd, shellLineInvocation, spawnPortable, spawnShellLine } from '../src/spawn.mjs';
-import { readJson, resolvePath } from '../src/fs-util.mjs';
+import { createJsonExclusively, identityPath, readJson, resolvePath } from '../src/fs-util.mjs';
 import { tempDir, testConfig, windowsPath } from './helpers.mjs';
 import { listSessionFiles, resolveSessionDir } from '../src/import/sessions.mjs';
 
@@ -148,13 +148,27 @@ test('doctor reports an installed command whose interpreter has gone', () => {
   const healthy = runDoctor(config, path.join(root, 'config.json'));
   assert.equal(healthy.checks.some((check) => check.id.endsWith(':executable')), false);
 
-  const stateFile = config.installStateFile;
-  fs.writeFileSync(stateFile, fs.readFileSync(stateFile, 'utf8')
-    .replaceAll(JSON.stringify(process.execPath).slice(1, -1), '/nowhere/node/v20.11.0/bin/node'));
-  const broken = runDoctor(config, path.join(root, 'config.json'));
+  let broken;
+  if (process.platform === 'win32') {
+    // On Windows Claude Code's commands start the `node` found on PATH, not the
+    // Node that ran install (intent 17), so the interpreter that can go is that
+    // one: a PATH with no `node` on it.
+    const record = readJson(config.installStateFile).installs[`project:${identityPath(root)}`].claude;
+    assert.match(record.statusCommand, /^node "/, 'a bare node, resolved on PATH');
+    const env = { ...process.env };
+    for (const key of Object.keys(env)) if (key.toUpperCase() === 'PATH') delete env[key];
+    env.PATH = tempDir('tw-no-node-');
+    broken = runDoctor(config, path.join(root, 'config.json'), { env });
+  } else {
+    const stateFile = config.installStateFile;
+    fs.writeFileSync(stateFile, fs.readFileSync(stateFile, 'utf8')
+      .replaceAll(JSON.stringify(process.execPath).slice(1, -1), '/nowhere/node/v20.11.0/bin/node'));
+    broken = runDoctor(config, path.join(root, 'config.json'));
+  }
   const finding = broken.checks.find((check) => check.id.endsWith(':executable'));
   assert.ok(finding, 'the missing interpreter must be reported');
   assert.equal(finding.status, 'error');
+  if (process.platform === 'win32') assert.match(finding.detail, /`node` is not on PATH here/);
   assert.equal(broken.ok, false, 'and it must make the whole report fail');
 });
 
@@ -595,4 +609,40 @@ test('a JSON file saved with a byte-order mark reads as the JSON it holds', () =
   assert.deepEqual(readJson(file), { retentionDays: 30 });
   fs.writeFileSync(file, '{"a": "﻿ inside a string stays"}');
   assert.equal(readJson(file).a, '﻿ inside a string stays', 'only a leading mark is dropped');
+});
+
+// FAT and exFAT volumes, and some network shares, cannot make hard links, and
+// Windows reports that as EISDIR or EINVAL rather than EPERM. config.json was
+// then never created, and every command failed. Real bytes cannot stage a
+// filesystem without links, so fs.linkSync is replaced for this one case and
+// every other call goes to the real fs (disclosed in the test principles).
+test('a volume that cannot hard-link still gets config.json created exactly once', () => {
+  const dir = tempDir('tokenwatch-nolink-');
+  const file = path.join(dir, 'config.json');
+  const original = fs.linkSync;
+  for (const code of ['EISDIR', 'EINVAL']) {
+    fs.rmSync(file, { force: true });
+    fs.linkSync = () => { throw Object.assign(new Error(`simulated ${code}`), { code }); };
+    try {
+      assert.equal(createJsonExclusively(file, { projectSalt: 'first' }), true, `${code}: the file is created without a link`);
+      assert.equal(createJsonExclusively(file, { projectSalt: 'second' }), false, `${code}: a second creator does not replace it`);
+    } finally {
+      fs.linkSync = original;
+    }
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).projectSalt, 'first');
+    assert.deepEqual(fs.readdirSync(dir).filter((name) => name.endsWith('.tmp')), [], `${code}: no temporary file is left`);
+  }
+});
+
+// A config.json holding no settings (`null`) was replaced before; while it was
+// treated as "someone else created it", every run drew a new project salt.
+test('a config.json that holds no settings is replaced once, and its salt then stays', async () => {
+  const { loadConfig } = await import('../src/config.mjs');
+  const home = tempDir('tokenwatch-nullconfig-');
+  fs.writeFileSync(path.join(home, 'config.json'), 'null\n');
+  const first = loadConfig({ env: { TOKENWATCH_HOME: home } }).config.projectSalt;
+  const second = loadConfig({ env: { TOKENWATCH_HOME: home } }).config.projectSalt;
+  assert.match(first, /^[0-9a-f]{64}$/);
+  assert.equal(second, first, 'the salt written on repair is the one every later run uses');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8')).projectSalt, first);
 });

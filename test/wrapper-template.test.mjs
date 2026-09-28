@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { tempDir } from './helpers.mjs';
+import { killSpy, processGone, staleKills, tempDir } from './helpers.mjs';
 
 // Intent 16, D15 (SM-09): the shipped wrapper template, adapted the way a
 // user adapts it - by editing COMMANDS and TOKENWATCH in a copy - and run
@@ -61,7 +61,10 @@ test('run inside a composed Tokenwatch status line, the wrapper does not run Tok
   assert.equal(fs.existsSync(path.join(dir, 'tw-ran')), false, 'the outer Tokenwatch already records and prints');
 });
 
-test('the wrapper template drops a command that runs past its timeout and leaves no process behind', { skip: process.platform === 'win32' ? 'POSIX process groups' : false }, () => {
+// On Windows the command runs through cmd.exe, which starts node as a child of
+// its own: killing cmd.exe alone left node running and holding the pipe, so
+// the wrapper waited for it (the same flaw the composed render had).
+test('the wrapper template drops a command that runs past its timeout and leaves no process behind', async () => {
   const dir = tempDir('wrapper-timeout-');
   const commands = [
     { command: script(dir, 'slow', `fs.writeFileSync(dir + '/pid', String(process.pid)); process.stdout.write('LATE'); setInterval(() => {}, 1000);`), shell: 'posix' },
@@ -74,7 +77,51 @@ test('the wrapper template drops a command that runs past its timeout and leaves
   assert.equal(result.status, 0, `the wrapper returned by itself (signal ${result.signal})`);
   assert.equal(result.stdout.toString(), 'FAST\n');
   const pid = Number(fs.readFileSync(path.join(dir, 'pid'), 'utf8'));
-  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  assert.ok(await processGone(pid), 'the timed-out command is not left running');
+});
+
+// A command whose shell has exited while a program it started holds the pipe
+// is not killed by the shell's old id, which the system may have given to an
+// unrelated program; the commands still running are stopped together, with
+// one taskkill on Windows, so the stop costs one bound however many there are.
+test('the wrapper template never kills a command by an id Node saw exit, and stops the rest together', async () => {
+  const dir = tempDir('wrapper-exited-');
+  const program = path.join(dir, 'program.mjs');
+  fs.writeFileSync(program, `import fs from 'node:fs';
+fs.writeFileSync(${JSON.stringify(path.join(dir, 'pid-left'))}, String(process.pid));
+setInterval(() => process.stdout.write('LATE\\n'), 100);
+setTimeout(() => process.exit(0), 20000);
+`);
+  const hung = (name) => script(dir, name, `fs.writeFileSync(dir + '/pid-${name}', String(process.pid)); process.stdout.write('LATE'); setInterval(() => {}, 1000);`);
+  // The launcher's program is detached on Windows only because Node puts every
+  // other child in a job object that ends it when the launcher exits.
+  const commands = [
+    { command: script(dir, 'launcher', `import { spawn } from 'node:child_process';
+spawn(process.execPath, [${JSON.stringify(program)}], { stdio: ['ignore', 'inherit', 'ignore'], detached: process.platform === 'win32', windowsHide: true }).unref();`), shell: 'posix' },
+    { command: hung('a'), shell: 'posix' },
+    { command: hung('b'), shell: 'posix' },
+    { command: script(dir, 'fast', `process.stdout.write('FAST\\n');`), shell: 'posix' }
+  ];
+  const timeoutMs = process.platform === 'win32' ? 4000 : 1500;
+  const spy = killSpy(dir);
+  const result = spawnSync(process.execPath, ['--require', spy.preload, adapted(dir, { commands, tokenwatch: script(dir, 'tw', ''), timeoutMs })],
+    { input: '{"x":1}', env: { ...process.env, TOKENWATCH_COMPOSED: '1' }, timeout: timeoutMs + 10000 });
+  assert.equal(result.status, 0, `the wrapper returned by itself (signal ${result.signal})`);
+  assert.equal(result.stdout.toString(), 'FAST\n');
+  const lines = spy.read();
+  const [launcherShell] = lines.filter((line) => line.startsWith('spawn ')).map((line) => line.slice(6));
+  assert.ok(lines.includes(`exit ${launcherShell}`), `the case needs the first shell to exit before the timeout: ${lines.join(' | ')}`);
+  assert.deepEqual(staleKills(lines), [], `a kill went to an id Node had already seen exit: ${lines.join(' | ')}`);
+  if (process.platform === 'win32') {
+    const runs = lines.filter((line) => line.startsWith('taskkill'));
+    assert.equal(runs.length, 1, `one taskkill for every command still running: ${lines.join(' | ')}`);
+    assert.equal(runs[0].split(' ').length - 1, 2, `naming both hung commands: ${runs[0]}`);
+  }
+  for (const name of ['a', 'b']) {
+    assert.ok(await processGone(Number(fs.readFileSync(path.join(dir, `pid-${name}`), 'utf8'))), `hung command ${name} is not left running`);
+  }
+  const left = Number(fs.readFileSync(path.join(dir, 'pid-left'), 'utf8'));
+  assert.ok(await processGone(left, { timeoutMs: 5000 }), 'the program the exited shell left ends at its next write once the pipe is let go');
 });
 
 test('Tokenwatch never runs the wrapper template: no source, bin or script file names it', () => {

@@ -8,8 +8,14 @@ import { fileURLToPath } from 'node:url';
 import { assessInstallLocation, bundledSkills, claudeCommands, composedStatusCommand, install, runsThisCli, skillUsage, uninstall } from '../src/installer.mjs';
 import { AGENTS, FAIL_CLOSED_HOOK_EVENTS } from '../src/constants.mjs';
 import { identityPath, readJsonc } from '../src/fs-util.mjs';
+import { claudeShell, shellLineInvocation } from '../src/spawn.mjs';
 import { runDoctor } from '../src/doctor.mjs';
 import { symlinkUnavailable, tempDir, testConfig, windowsPath } from './helpers.mjs';
+
+// The install key a project-scope install records and writes into its
+// composed status command: `installKey()`'s spelling, which folds case on
+// Windows (`identityPath`), so `c:\users\...` and `C:\Users\...` are one record.
+const projectKey = (project) => `project:${identityPath(project)}`;
 
 function paths(root) {
   return {
@@ -1574,7 +1580,7 @@ test('a composed install keeps the existing status line, runs it beside Tokenwat
   const before = { claude: fs.readFileSync(p.claudeSettings), copilot: fs.readFileSync(p.copilotConfig) };
 
   const record = install(config, options(root, { agents: 'claude,copilot', compose: true }));
-  const key = `project:${root}`;
+  const key = projectKey(root);
   const claudeLine = JSON.parse(fs.readFileSync(p.claudeSettings, 'utf8')).statusLine;
   const copilotLine = JSON.parse(fs.readFileSync(p.copilotConfig, 'utf8')).statusLine;
   for (const [agent, line, prior] of [['claude', claudeLine, priorClaude], ['copilot', copilotLine, priorCopilot]]) {
@@ -1613,7 +1619,7 @@ test('a status line that only mentions tokenwatch is composed, with a warning th
   assert.match(record.claude.warning, /mentions Tokenwatch but does not run it, so it was composed/);
   assert.ok(record.claude.warning.includes(p.claudeSettings), 'names the file');
   assert.doesNotMatch(record.claude.warning, /mystatus|secret-flag/, 'never the command');
-  assert.deepEqual(composedStatusCommand(config, `project:${root}`, 'claude')?.map((spec) => spec.command), [command]);
+  assert.deepEqual(composedStatusCommand(config, projectKey(root), 'claude')?.map((spec) => spec.command), [command]);
 });
 
 test('composing into a project whose shared settings outrank Tokenwatch writes only the local file and never touches the shared one', () => {
@@ -1674,14 +1680,23 @@ test('a default install into a taken slot composes it, records tokens on the fir
     assert.equal(record[agent].compose?.length, 1, `${agent}: composed without a flag`);
     assert.equal(record[agent].warning, undefined, `${agent}: ${record[agent].warning}`);
   }
-  const line = JSON.parse(fs.readFileSync(p.claudeSettings, 'utf8')).statusLine.command;
-  assert.match(line, /--compose/);
-  const cli = fileURLToPath(new URL('../bin/tokenwatch.mjs', import.meta.url));
-  const payload = fs.readFileSync(fileURLToPath(new URL('./fixtures/claude-status-1.json', import.meta.url)));
-  const render = spawnSync(process.execPath, [cli, 'status', '--agent', 'claude', '--ingest-stdin', '--compose', `project:${root}`],
-    { input: payload, encoding: 'utf8', env: { ...process.env, TOKENWATCH_HOME: home, TOKENWATCH_COMPOSED: '', NO_COLOR: '1' } });
-  assert.equal(render.status, 0, render.stderr);
-  assert.match(render.stdout, /OTHER-ROW/, 'the other line renders');
+  // The installed lines themselves, run through the shell each agent runs its
+  // status line with, so the install key the command carries is the one the
+  // record is filed under, whatever the platform spells it (on Windows it is
+  // case-folded, and a mismatch would silently compose nothing).
+  const env = { ...process.env, TOKENWATCH_HOME: home, TOKENWATCH_COMPOSED: '', NO_COLOR: '1' };
+  for (const [agent, file, shellSpec, fixture] of [
+    ['claude', p.claudeSettings, claudeShell(), 'claude-status-1.json'],
+    ['copilot', p.copilotConfig, { shell: process.platform === 'win32' ? 'cmd' : 'posix' }, 'copilot-status-1085.json']
+  ]) {
+    const line = readJsonc(file).statusLine.command;
+    assert.ok(line.includes('--compose') && line.includes(projectKey(root)), `${agent}: the installed line composes under the recorded key: ${line}`);
+    const payload = fs.readFileSync(fileURLToPath(new URL(`./fixtures/${fixture}`, import.meta.url)));
+    const { file: program, args, shell } = shellLineInvocation(line, shellSpec);
+    const render = spawnSync(program, args, { shell, input: payload, encoding: 'utf8', env, windowsHide: true });
+    assert.equal(render.status, 0, `${agent}: ${render.stderr}`);
+    assert.match(render.stdout, /OTHER-ROW/, `${agent}: the other line renders`);
+  }
   assert.ok(fs.readdirSync(path.join(home, 'sessions')).length >= 1, 'the first render recorded a reading');
   uninstall(config, { scope: 'project', project: root });
   assert.equal(Buffer.compare(fs.readFileSync(p.claudeSettings), before.claude), 0);
@@ -1742,7 +1757,7 @@ test('install --repair keeps what it composed, adopts what replaced the slot, an
   assert.equal(repaired.claude.compose[1].carried, undefined);
   assert.equal(repaired.claude.priorStatusLine.command, 'tool-b --line', 'uninstall puts back what the slot held at this repair');
   assert.match(JSON.parse(fs.readFileSync(p.claudeSettings, 'utf8')).statusLine.command, /--compose/);
-  assert.deepEqual(composedStatusCommand(config, `project:${root}`, 'claude').map((spec) => spec.command), ['tool-a --line', 'tool-b --line']);
+  assert.deepEqual(composedStatusCommand(config, projectKey(root), 'claude')?.map((spec) => spec.command), ['tool-a --line', 'tool-b --line']);
   uninstall(config, { scope: 'project', project: root });
   assert.equal(JSON.parse(fs.readFileSync(p.claudeSettings, 'utf8')).statusLine.command, 'tool-b --line');
 });
@@ -1756,7 +1771,7 @@ test('install --repair with nothing to repair writes nothing, and a second repai
   install(config, options(root, { agents: 'claude,copilot' }));
   const snapshot = () => [p.claudeSettings, p.copilotConfig, config.installStateFile].map((file) => fs.readFileSync(file));
   const before = snapshot();
-  assert.deepEqual(install(config, repairOptions(root)), { repaired: false, reason: 'nothing to repair', key: `project:${root}` });
+  assert.deepEqual(install(config, repairOptions(root)), { repaired: false, reason: 'nothing to repair', key: projectKey(root) });
   snapshot().forEach((bytes, index) => assert.equal(Buffer.compare(bytes, before[index]), 0, `file ${index} unchanged`));
   fs.writeFileSync(p.claudeSettings, '{\n  "statusLine": { "type": "command", "command": "tool-b" }\n}\n');
   assert.equal(install(config, repairOptions(root)).repaired, true);
@@ -1839,7 +1854,7 @@ test('a hook and a composed render never repair, and leave a drifted install exa
   const payload = fs.readFileSync(fileURLToPath(new URL('./fixtures/claude-status-1.json', import.meta.url)));
   const hook = spawnSync(process.execPath, [cli, 'hook', 'claude', 'Stop'], { input: JSON.stringify({ session_id: 's-1', hook_event_name: 'Stop' }), env });
   assert.equal(hook.status, 0);
-  const render = spawnSync(process.execPath, [cli, 'status', '--agent', 'claude', '--ingest-stdin', '--compose', `project:${root}`], { input: payload, env });
+  const render = spawnSync(process.execPath, [cli, 'status', '--agent', 'claude', '--ingest-stdin', '--compose', projectKey(root)], { input: payload, env });
   assert.equal(render.status, 0);
   [p.claudeSettings, config.installStateFile].forEach((file, index) => assert.equal(Buffer.compare(fs.readFileSync(file), before[index]), 0, `${file} unchanged`));
 });
