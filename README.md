@@ -157,41 +157,6 @@ verified** means someone ran that agent with Tokenwatch and saw it record;
 means smoke-tested at most; **Failed hands-on** means a real run broke, fixes
 have landed since, and nobody has re-run it yet.
 
-<!-- support-matrix:begin (generated from docs/support-matrix.json by scripts/support-matrix.mjs; do not edit by hand) -->
-
-Last reviewed: 2026-09-28.
-
-| Agent | Linux | macOS | Windows | WSL |
-|---|---|---|---|---|
-| Claude Code | **Hands-on verified**: 2.1.280 and 2.1.281, 2026-09-24 | **Tested in CI** (last green 2026-09-28), not yet hands-on | **Failed hands-on** 2026-09-28 (version 2.1.283); fixes landed, not re-verified; some causes still open | **Untested** |
-| Codex CLI | **Provisional**: smoke-tested 2026-09-17 (version not recorded) | **Provisional**: CI only (last green 2026-09-28), not yet hands-on | **Failed hands-on** 2026-09-23 (version not recorded); fixes landed, not re-verified; some causes still open | **Untested** |
-| GitHub Copilot CLI | **Hands-on verified**: 1.0.85, 2026-09-17 | **Tested in CI** (last green 2026-09-28), not yet hands-on | **Provisional**: smoke-tested 2026-09-28 (version 1.0.88) | **Untested** |
-
-**CI.** The `ci` workflow runs on ubuntu-latest, macos-latest and windows-latest, each on Node 20, 22 and 24. It last passed on 2026-09-28 (commit `ceb070d`). All nine jobs passed, the first green Windows run since the fixes from both Windows live tests.
-
-- CI runs Tokenwatch's own test suite and smoke test. It does not run Claude Code, Codex CLI or GitHub Copilot CLI, so it cannot show that an agent executes the commands Tokenwatch writes; only a hands-on run can.
-- A hands-on date covers the Tokenwatch build installed that day; later changes are covered by the test suite, not by that run.
-- Not live-tested for this release: Codex CLI on any operating system (its cells record older smoke tests and the 2026-09-23 Windows failure), and any agent on macOS, where only the test suite has run.
-
-<details>
-<summary>Evidence for each cell</summary>
-
-- **Claude Code on Linux.** The maintainer's machine, a Linux container, has recorded Claude Code status-line samples and hook events continuously since 2026-09-09; the newest, on 2026-09-24, came from sessions running Claude Code 2.1.280 and 2.1.281. Subagent counts were reconciled against Claude Code's own transcripts. That machine ran a build from before the 0.2.0 changes dated 2026-09-24 (sandbox-safe reports, doctor's collection and status-line checks, install-location warnings).
-- **Codex CLI on Linux.** Smoke-tested, not field-tested. On 2026-09-17 a session started through `tokenwatch-codex` recorded token counts over OpenTelemetry and `notify` recorded turn boundaries; on 2026-09-18 host detection was checked by running `codex exec`; the Codex version was not recorded for either. On 2026-09-24, after a user-scope and after a project-scope install, the skill list codex-cli 0.154.0 gives its model (`codex debug prompt-input`) held all six skills. The recorded events have not been reconciled against Codex's own session logs, which the release checklist requires before an adapter counts as field-tested. A session started as plain `codex` records no tokens (`docs/limitations.md`).
-- **GitHub Copilot CLI on Linux.** On 2026-09-17 a live GitHub Copilot CLI 1.0.85 session delivered status-line renders and hook events, and the per-call token delta derived from its cumulative counters matched the `last_call_*` figures Copilot reports separately; the captured payloads are the 1.0.85 fixtures in `test/fixtures`. The recorded data was checked again on 2026-09-21. Hook entries have since become a `bash` and `powershell` pair and `preToolUse` is no longer registered (0.2.0, 2026-09-24); no real Copilot has run that form yet.
-- **Claude Code on macOS, Codex CLI on macOS and GitHub Copilot CLI on macOS.** The `ci` matrix ran the full suite and the smoke test on `macos-latest` for Node 20, 22 and 24, all passing on 2026-09-28. No hands-on run on a Mac is recorded for any agent.
-- **Claude Code on Windows.** Hands-on 2026-09-28 with Git Bash present (Windows 11, PowerShell 5.1 and 7, Node 20): install at user and project scope, including a project path with spaces and a settings file with a byte-order mark, CRLF line endings and tabs; hooks and the status line recorded; composition with another tool's status line and `install --repair`; the privacy canary found nowhere; all seven skills; history import and undo; and uninstall restoring every settings file byte for byte all passed. Five checks failed and are fixed since, not re-run on Windows: doctor skipped its command probes for a settings file with a byte-order mark, a hand-run `status` waited forever on an open stdin, status-line renders with no model call were counted as turns, and two background subagents were counted as one. Not run: the pass without Git Bash, where Claude Code uses PowerShell.
-- **Codex CLI on Windows.** Hands-on 2026-09-23, with Codex started as plain `codex`: no tokens were recorded (expected without `tokenwatch-codex`), no Codex events reached the ledger at all, reporting commands failed with `EPERM` inside Codex's sandbox, and the skills could not be found; the same day's test run showed the installer did not recognise its own `notify` relay. Fixed since: reporting commands work where the data directory is read-only, the relay is recognised by its parsed arguments, and the README, install output and skills give Codex's `$tw-...` syntax while `doctor` checks where Codex looks for skills. Still open: why no Codex events arrived at all, and whether the skill syntax was the whole skills problem. `doctor` now tells the causes apart (the relay failing, with its stage and error class; the relay never started; Codex not launched through `tokenwatch-codex`), and Codex's source shows it starts `notify` outside its sandbox (`docs/limitations.md`), but which cause applied there is unknown. Nothing has been re-run on Windows.
-- **GitHub Copilot CLI on Windows.** Smoke-tested 2026-09-28 with Copilot CLI 1.0.88 (Windows 11, PowerShell 5.1 and 7): user and project install, ten hook events with no `preToolUse`, every hook command run under both PowerShells, no tool call denied, the status line recording through cmd.exe with AI units and premium requests matching Copilot's own, all seven skills, a verified history import and its undo, and uninstall restoring the settings files. One session of three prompts was reported as 16 turns; since then a Copilot turn is one prompt and its whole answer and renders with no model call are not turns, not yet re-run on Windows. Not run: the regression scenarios (refused settings, a failing hook, composition and repair, an edited skill, a corrupt state file) and the check of Copilot's session variable.
-- **Claude Code on WSL, Codex CLI on WSL and GitHub Copilot CLI on WSL.** No run inside a WSL distribution is recorded for any agent. Under WSL Tokenwatch runs as Linux code, which the Linux CI leg covers. The Linux machine above is a container on a WSL2 kernel, not a WSL distribution used from Windows, so it does not exercise the split between the WSL and Windows home directories that `INSTALL.md` warns about.
-
-</details>
-
-<!-- support-matrix:end -->
-
-The table is generated from [`docs/support-matrix.json`](docs/support-matrix.json),
-and a test fails if the two disagree.
-
 ## Where your data lives
 
 ```text
