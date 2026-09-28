@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { aggregateEvents } from '../src/aggregate.mjs';
-import { analyzeEvents } from '../src/analyze.mjs';
+import { compactionSummary } from '../src/rank.mjs';
+import { analyzeEvents, formatAuditMarkdown } from '../src/analyze.mjs';
 import { makeEvent } from '../src/schema.mjs';
 import { tempDir, testConfig } from './helpers.mjs';
 
@@ -90,7 +91,7 @@ test('context percent is captured for increment-basis and usage-less turns alike
   const report = analyzeEvents(events, testConfig(tempDir()), {});
   const observation = report.observations.find((o) => o.id === 'context-percent');
   assert.ok(observation, 'a context-percent observation must be produced');
-  assert.match(observation.evidence, /3 turns/);
+  assert.match(observation.evidence, /3 readings/);
 });
 
 // Claude's status line is basis: 'sample' throughout, so context and the token
@@ -138,4 +139,191 @@ test('imported turns are counted apart, and first/last are the earliest and late
   const audit = analyzeEvents([live, imported(1, '2026-06-01T10:00:00.000Z', 'verified')], testConfig(tempDir()));
   assert.match(audit.observations.find((row) => row.id === 'coverage').evidence,
     /1 turns were imported from session files \(tokens only, no provider cost; 1 verified, 0 unverified\)/);
+});
+
+// F3: a status-line group is render-only - not a turn - only when nothing in it
+// moved. These pin the edges of that rule.
+function claudeRender({ turn, ts, usage, cost, session = 's' }) {
+  return makeEvent({
+    agent: 'claude', kind: 'usage', source: 'statusline', event_name: 'status', session_id: session, turn_id: turn, ts,
+    usage: usage && { ...usage, semantics: 'components', basis: 'sample' },
+    cost: cost === undefined ? { cumulative_usd: 1, basis: 'provider_reported', currency: 'USD' }
+      : { cumulative_usd: 1, delta_usd: cost, basis: 'provider_reported', currency: 'USD' },
+    context: { percent: 10 }
+  });
+}
+
+test('a zero-cost render whose gauge moved is still counted as a turn', () => {
+  const events = [
+    claudeRender({ turn: 'p1', ts: '2026-09-28T10:00:00.000Z', usage: { input_total: 100, output: 5 }, cost: 0.02 }),
+    // No cost moved, but the gauge describes a different call than the turn before.
+    claudeRender({ turn: 'p2', ts: '2026-09-28T10:01:00.000Z', usage: { input_total: 140, output: 9 }, cost: 0 })
+  ];
+  const aggregate = aggregateEvents(events);
+  assert.equal(aggregate.turns, 2);
+  assert.equal(aggregate.render_only_readings, 0);
+});
+
+test('the first render of a prompt is a turn even when its cost is only a baseline', () => {
+  const prompt = makeEvent({ agent: 'claude', kind: 'lifecycle', source: 'hook', event_name: 'UserPromptSubmit', session_id: 's', turn_id: 'p1', ts: '2026-09-28T10:00:00.000Z' });
+  // The first cumulative observation is a baseline and carries no delta.
+  const render = claudeRender({ turn: 'p1', ts: '2026-09-28T10:00:05.000Z', usage: { input_total: 100, output: 5 } });
+  assert.equal(aggregateEvents([prompt, render]).turns, 1, 'a prompt hook with the same turn id backs it');
+  assert.equal(aggregateEvents([render]).turns, 0, 'alone, a first render with no cost is a baseline render');
+  assert.equal(aggregateEvents([render]).context_percent_samples.turns, 1);
+});
+
+test('imported, Codex and hook-carried turns are never render-only, even at zero cost', () => {
+  const imported = makeEvent({
+    agent: 'claude', kind: 'usage', source: 'import', session_id: 'h', turn_id: 'r1', ts: '2026-09-01T10:00:00.000Z',
+    usage: { input_total: 50, output: 5, semantics: 'components', basis: 'transcript' },
+    import: { mapping_id: 'claude-jsonl-1', mapping_version: '1.0', run_id: 'run-1', verification: 'verified' }
+  });
+  const codex = makeEvent({
+    agent: 'codex', kind: 'usage', source: 'otlp', event_name: 'codex.sse_event', session_id: 'c', turn_id: 't1', ts: '2026-09-01T11:00:00.000Z',
+    usage: { input_total: 0, output: 0, semantics: 'cached_subset', basis: 'increment' }
+  });
+  const compact = makeEvent({
+    agent: 'claude', kind: 'compact', source: 'hook', event_name: 'PreCompact', session_id: 's', turn_id: 'k', ts: '2026-09-01T12:00:00.000Z',
+    context: { percent: 80 }
+  });
+  const aggregate = aggregateEvents([imported, codex, compact]);
+  assert.equal(aggregate.turns, 3);
+  assert.equal(aggregate.render_only_readings, 0);
+});
+
+test('the audit says how many renders were not counted as turns', () => {
+  const events = [
+    claudeRender({ turn: 'p1', ts: '2026-09-28T10:00:00.000Z', usage: { input_total: 100, output: 5 }, cost: 0.02 }),
+    claudeRender({ turn: 'slash', ts: '2026-09-28T10:01:00.000Z', usage: { input_total: 100, output: 5 }, cost: 0 })
+  ];
+  const report = analyzeEvents(events, testConfig(tempDir()));
+  assert.equal(report.aggregate.turns, 1);
+  assert.match(report.observations.find((row) => row.id === 'coverage').evidence,
+    /1 status-line renders with no model call behind them \(a slash command or a baseline render\) are not counted as turns; their context readings are kept\./);
+  assert.match(formatAuditMarkdown(report), /1 status-line renders with no model call behind them are not counted/);
+});
+
+// L2 (review): since render-only readings stopped being turns, the gauge
+// counts beside the turn count are counts of readings. "1 turns ... 2 carry
+// latest-call gauge samples" read as two of one turn.
+test('gauge counts that include render-only readings are called readings, not turns', () => {
+  const events = [
+    claudeRender({ turn: 'p1', ts: '2026-09-28T10:00:00.000Z', usage: { input_total: 100, output: 5 }, cost: 0.02 }),
+    claudeRender({ turn: 'slash', ts: '2026-09-28T10:01:00.000Z', usage: { input_total: 100, output: 5 }, cost: 0 })
+  ];
+  const report = analyzeEvents(events, testConfig(tempDir()));
+  assert.equal(report.aggregate.turns, 1);
+  assert.equal(report.aggregate.context_samples.turns, 2, 'the field keeps its name; it counts readings');
+  const coverage = report.observations.find((row) => row.id === 'coverage').evidence;
+  assert.match(coverage, /^1 turns across 1 identified sessions; 0 carry additive token counts, 1 have provider-reported cost and 0 have configured estimates\. 2 latest-call gauge readings were recorded, including any that are not turns\./);
+  assert.doesNotMatch(coverage, /carry latest-call gauge samples/);
+  assert.match(report.observations.find((row) => row.id === 'context-percent').evidence, /^Context-window percent: 2 readings;/);
+  const markdown = formatAuditMarkdown(report);
+  assert.match(markdown, /- Latest-call gauge samples \(2 readings\):/);
+  assert.match(markdown, /- Context-window percent \(2 readings\):/);
+  assert.doesNotMatch(markdown, /\(2 turns\)/);
+});
+
+// L7 (review): a status-line reading that moved billing units is a turn even
+// when it moved no dollars, repeats the previous gauge and no prompt hook backs
+// it: Copilot bills in AI units. Nothing held the billing half of the rule.
+test('a reading that moved billing units is a turn even with no dollars and an unchanged gauge', () => {
+  const reading = (turn, ts, billing) => makeEvent({
+    agent: 'copilot', kind: 'usage', source: 'statusline', event_name: 'status', session_id: 'u', turn_id: turn, ts,
+    usage: { input_total: 100, output: 5, semantics: 'cached_subset', basis: 'sample' },
+    billing, context: { percent: 10 }
+  });
+  const events = [
+    reading('r1', '2026-09-28T10:00:00.000Z', { aiu: 0.2 }),
+    reading('r2', '2026-09-28T10:01:00.000Z', { aiu: 0.3, premium_requests: 1 }),
+    reading('r3', '2026-09-28T10:02:00.000Z', undefined)
+  ];
+  const aggregate = aggregateEvents(events);
+  assert.equal(aggregate.turns, 2, 'the two readings that moved units');
+  assert.equal(aggregate.render_only_readings, 1, 'the one that moved nothing');
+  assert.deepEqual(aggregate.turns_data.map((turn) => turn.turn_id), ['r1', 'r2']);
+});
+
+// M2, Windows live test: Claude Code reported a one-hour TTL, but the audit
+// judged idle gaps against the configured 300 s and flagged six as cold.
+function ttlTurn({ session, turn, ts, ttl }) {
+  return makeEvent({
+    agent: 'claude', kind: 'usage', source: 'statusline', session_id: session, turn_id: turn, ts,
+    usage: { input_total: 10000 + Number(turn.slice(1)) * 10, input_fresh: 10, cache_read: 9990, output: 50, semantics: 'components', basis: 'sample' },
+    cost: { delta_usd: 0.01, basis: 'provider_reported', currency: 'USD' },
+    cache: ttl ? { ttl_seconds: ttl, ttl_source: 'provider_reported' } : undefined
+  });
+}
+
+test('a gap inside the provider-reported cache TTL is not flagged as cold', () => {
+  const events = [
+    ttlTurn({ session: 'a', turn: 't1', ts: '2026-09-28T10:00:00.000Z', ttl: 3600 }),
+    ttlTurn({ session: 'a', turn: 't2', ts: '2026-09-28T10:10:00.000Z', ttl: 3600 })
+  ];
+  const report = analyzeEvents(events, { ...testConfig(tempDir()), cacheTtlSeconds: 300 });
+  assert.equal(report.observations.find((row) => row.id === 'ttl-gaps'), undefined,
+    'a 10-minute gap under a reported 1-hour TTL is warm');
+});
+
+test('a session with no reported TTL is judged against the configured TTL, and the finding says so', () => {
+  const events = [
+    ttlTurn({ session: 'a', turn: 't1', ts: '2026-09-28T10:00:00.000Z', ttl: 3600 }),
+    ttlTurn({ session: 'a', turn: 't2', ts: '2026-09-28T11:10:00.000Z', ttl: 3600 }), // 70 min: past 1 h
+    ttlTurn({ session: 'b', turn: 't1', ts: '2026-09-28T10:00:00.000Z' }),
+    ttlTurn({ session: 'b', turn: 't2', ts: '2026-09-28T10:10:00.000Z' }) // 10 min: past 300 s
+  ];
+  const config = { ...testConfig(tempDir()), cacheTtlSeconds: 300 };
+  const report = analyzeEvents(events, config);
+  const finding = report.observations.find((row) => row.id === 'ttl-gaps');
+  assert.ok(finding, 'both gaps are flagged');
+  assert.deepEqual(finding.ttl_sources, {
+    provider_reported_gaps: 1, provider_ttl_seconds: [3600],
+    configured_gaps: 1, configured_ttl_seconds: 300
+  });
+  assert.match(finding.evidence,
+    /^2 within-session gaps exceeded the cache TTL: 1 the provider-reported TTL \(3600s\), 1 the configured 300s TTL, an assumption used where no TTL was reported;/);
+  assert.equal(report.methodology.cache_ttl_basis, 'provider_reported_per_session_else_configured');
+
+  const configuredOnly = analyzeEvents(events.filter((event) => event.session_id === 'b'), config);
+  assert.match(configuredOnly.observations.find((row) => row.id === 'ttl-gaps').evidence,
+    /^1 within-session gaps exceeded the configured 300s cache TTL, an assumption: no TTL was reported for these sessions;/);
+});
+
+// L7 (review): a gap after a turn that ended before the session's first TTL
+// report is judged against that first report - still the provider's own value
+// for the session - not against the configured assumption.
+test('a gap before the session\'s first TTL report is judged against that report, not the configured TTL', () => {
+  const events = [
+    ttlTurn({ session: 'a', turn: 't1', ts: '2026-09-28T10:00:00.000Z' }),               // no cache block yet
+    ttlTurn({ session: 'a', turn: 't2', ts: '2026-09-28T10:10:00.000Z', ttl: 3600 })   // 10 min later, 1 h TTL
+  ];
+  const report = analyzeEvents(events, { ...testConfig(tempDir()), cacheTtlSeconds: 300 });
+  assert.equal(report.observations.find((row) => row.id === 'ttl-gaps'), undefined,
+    'a 10-minute gap in a session that reports a 1-hour TTL is warm');
+});
+
+// L11 (review): the maxima were taken by spreading every reading into one
+// Math.max call, which throws a RangeError past roughly 125,000 arguments. Every
+// render-only reading is kept since F3, so a long period reaches that.
+test('a period with more readings than one function call can take still reports its maxima', () => {
+  const count = 200_000;
+  const start = Date.parse('2026-09-01T00:00:00.000Z');
+  const events = [];
+  for (let index = 0; index < count; index += 1) {
+    events.push({
+      schema: 'tokenwatch.event/v1', agent: 'claude-code', kind: 'usage', source: 'statusline', event_name: 'status',
+      session_id: 'long', turn_id: `p${index}`, ts: new Date(start + index * 1000).toISOString(),
+      usage: { input_total: 1000 + (index % 5000), output: 5, semantics: 'components', basis: 'sample' },
+      cost: { delta_usd: 0.001, basis: 'provider_reported', currency: 'USD' },
+      context: { percent: index % 97 }
+    });
+  }
+  const aggregate = aggregateEvents(events);
+  assert.equal(aggregate.turns, count);
+  assert.equal(aggregate.context_samples.input_max, 5999);
+  assert.equal(aggregate.context_percent_samples.percent_max, 96);
+
+  const compactions = events.map((event) => ({ ...event, kind: 'compact', event_name: 'PreCompact' }));
+  assert.equal(compactionSummary(compactions).context_percent_max, 96);
 });

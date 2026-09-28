@@ -22,6 +22,12 @@
   Codex import next to live-captured sessions needs `--accept-unverified`.
   Its rows are then marked unverified. Which side is right about that request
   is not known.
+- `verified` tolerates a mismatch on a session's first or last compared
+  turn. Live capture starts and stops part-way through a session, so the turn
+  at either edge can hold more or less than the transcript's; such a mismatch
+  is counted in `boundary_mismatches` and does not decide the result. Any
+  mismatch in between does. So `matched` can be lower than `turns_compared`
+  in a verified import.
 - A mapping repaired by `tw-import-history` is found from the files' shape
   alone: a renamed or re-nested key, or a new file-name pattern. A renamed
   record-type value (`type: "assistant"` becoming something else) cannot be
@@ -56,14 +62,51 @@
 - A provider may omit cost, cache lifetime, reasoning tokens, or turn IDs. The
   corresponding status field stays absent or `n/a`.
 - The cache countdown is shown only when the provider reports a TTL. A
-  configured `cacheTtlSeconds` is an assumption used for gap analysis in audits
-  and is never rendered on the status line as though it were measured.
+  configured `cacheTtlSeconds` is an assumption, never rendered on the status
+  line as though it were measured. The audit's gap analysis uses the TTL the
+  provider reported for each session and falls back to `cacheTtlSeconds` only
+  for a session that reported none; its `ttl-gaps` finding says which it used.
+  Where a session's TTL changed, a gap is judged against the latest TTL
+  reported up to the end of the turn before it.
 - Status-line cumulative cost needs two observations before a per-turn delta is
   known. The first observation is a baseline by design.
-- Turn grouping is exact when a turn ID exists. Without one, a turn-opening
-  lifecycle hook delimits turns, so status-line refreshes between two prompts
-  collapse into a single turn. If neither signal is available, observations are
-  grouped per event.
+- The status line's `this reply` and `previous reply` come from a running total
+  the store keeps in session state for each of a session's newest 50 replies
+  that a prompt hook opened. A reply with no prompt hook behind it, one older
+  than that, and any reply in a state file written before the total existed
+  are summed from the live ring, which holds the session's newest 200 entries,
+  idle renders and tool hooks included, so a long one can show less there than
+  `analyze` does.
+- A turn is one prompt and its whole answer, however many model calls it
+  takes. Turn grouping is exact when a turn ID exists (Claude Code). Without
+  one (Copilot CLI), the prompt hook delimits turns: every row of a session
+  after a `userPromptSubmitted` and before the next belongs to that prompt,
+  in time order. This relies on the prompt hook carrying the same session id
+  as the status line; a hook without one delimits nothing. It is inferred from
+  timing, not told: a call whose render reaches Tokenwatch only after the next
+  prompt was submitted is counted in the next prompt's turn (period totals are
+  unaffected). Where neither signal exists - hooks not installed, or a
+  `--since` window that starts mid-reply, whose first calls have their prompt
+  hook outside the window - each row is its own turn (for Copilot, one model
+  call), and `analyze` reports how many in `undelimited_turns` rather than
+  merging them by guesswork. Turns are derived when the ledger is read, so a
+  ledger recorded before this rule is regrouped too.
+- A status-line render with no model call behind it is not a turn. Claude Code
+  gives `/status`, `/cost`, `/context`, the render after `/compact` and the
+  render before the first prompt a prompt id of their own; a group made only of
+  such readings, backed by no prompt hook, that moved no cost or billing units
+  and repeats the previous gauge is counted in `render_only_readings`, kept as a
+  context reading, and left out of every turn count and per-turn figure (the
+  rule is in `docs/event-schema.md`). It is inferred from what moved, not told:
+  a real prompt that failed before it cost anything is still a turn only
+  because its `UserPromptSubmit` carries the same prompt id, and a zero-cost
+  render whose gauge changed is still counted. The first reading of a session
+  has nothing to compare with, so one with no cost is treated as a baseline
+  render; with no prompt hook and no earlier render in the period, a first
+  reply whose cost is only that baseline is left out of the turn count, as its
+  cost already is. The status line applies the same rule: such a render is
+  never the reply in flight, the previous reply, or a slot in
+  `averagingWindow`.
 - A status line re-renders many times per turn, so its token counters are gauges
   describing the latest call. They are tagged `basis: "sample"` and are reported
   as distributions, never summed into a period total. Records written before this
@@ -83,9 +126,14 @@
   was on the write. To let Codex write it instead, add the directory to
   `sandbox_workspace_write.writable_roots` (see `INSTALL.md`, Codex CLI
   specifics).
-- JSONL writes are append-safe, but the compact state snapshot is best-effort
-  under heavy multi-process concurrency. `tokenwatch repair` rebuilds the
-  derived counters from the ledger when they drift.
+- JSONL writes are append-safe. The compact state snapshot is written under a
+  per-session lock, but a hook waits at most 2 s for it and a status render 1 s:
+  under a stall that keeps another process holding the lock longer, the event is
+  still recorded, without the lock, and that write can then lose an update to
+  the live state, its own or another's (see the next item). No update is lost
+  only while every write gets the lock within its wait. `tokenwatch repair`
+  rebuilds the subagent counts from the ledger when they drift, and resets the
+  count `doctor` reports.
 - A session state file that is truncated or otherwise unreadable (a full disk,
   an interrupted copy) is not repaired or replaced automatically. The store
   cannot load it, so that session's hooks record nothing more - silently, since
@@ -99,11 +147,32 @@
   itself to the session it is rendering. Each session keeps its own state file,
   so concurrent sessions have one writer each and cannot overwrite one another;
   only the append-only ledger is shared. That removes contention *between*
-  sessions, not *within* one: the state file is read, modified and rewritten per
-  event with no lock, so two hook invocations close together in the same session
-  can still race, and the losing write's contribution is overwritten rather than
-  merged. The ledger is append-only and keeps both, which is why `repair`
-  rebuilds derived counters from it.
+  sessions. *Within* one, hooks fire in the same instant (two subagents launched
+  together are two `SubagentStart` hooks at once), and each reads, changes and
+  rewrites the state file, so the file is guarded by a lock beside it
+  (`sessions/s_<hash>.lock`, `state.lock` for events with no session id): the
+  writes of one session are applied one after the other. The wait is bounded,
+  because a hook must never hold up the agent: after 2 s (well inside the 5 s
+  timeout Tokenwatch installs its hooks with; 1 s for a status render) the event
+  is stored without the lock, as every event was before it existed, and the
+  ledger row is appended either way. Only then can two writes still race, the
+  loser's update to the live state being overwritten rather than merged; each
+  such write is counted, and `tokenwatch doctor` reports the count since the
+  last `tokenwatch repair` (`session-state:unlocked-writes`). The count is kept
+  in the state file an overlapping write can overwrite, so it is a lower bound.
+  A lock can outlive its write: a hook the agent killed at its timeout, or a
+  status render Claude Code cancelled, leaves its lock file behind, and it
+  stays, legitimately, until that session's next write takes it over. That is
+  at once where its process id can be checked (same machine) and shows it
+  exited; otherwise after ten seconds, twice the hook timeout, so a hook still
+  writing is never taken over. A takeover is made by one process at a time and
+  never removes a fresh lock that took the stale one's place. A lock found in a
+  data directory this process cannot write (a read-only mount, Codex's sandbox)
+  is not waited for: the write is refused at once, as it would be anyway. A
+  report that finds a session's lock busy does not flush that session's
+  in-flight turn, since two flushes could append it twice; it includes the turn
+  from memory, counted once even if the lock's holder has just appended it, and
+  a later report flushes it.
 - That per-session scoping is exact for the status line, which always pipes its
   own session id on stdin. `tokenwatch status` run by hand picks its session in
   this order: the piped payload's id; `--session <id>`; the agent's own session

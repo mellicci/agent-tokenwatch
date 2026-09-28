@@ -5,19 +5,24 @@ import crypto from 'node:crypto';
 import { assertPrivacySafe, cleanUsage } from './schema.mjs';
 import { atomicWriteJson, ensureDir, isWriteRefused, readJson, writeTextAtomic } from './fs-util.mjs';
 import { estimateEventCost, loadPricing } from './pricing.mjs';
+import { withStateLock } from './state-lock.mjs';
 
 const STATE_VERSION = 2;
 const RECENT_LIMIT = 200;
 const FINGERPRINT_LIMIT = 1200;
 const PENDING_MAX_AGE_MS = 60 * 60 * 1000;
 const MAX_PENDING_TURNS = 8;
+// Running totals kept for the newest replies (openReplyTotal below); older
+// replies fall back to what the ring still holds, as every reply used to.
+const REPLY_TOTAL_LIMIT = 50;
 
 // A status line re-renders many times per turn. These events open a new turn, so
 // they are the boundary at which the previous turn's final sample is durable.
 // Codex has no lifecycle hook for this, but its OTLP stream names the moment a
 // prompt is submitted, which is the same boundary. Without it every Codex
-// observation was its own turn.
-const TURN_OPENING_EVENTS = new Set(['UserPromptSubmit', 'userPromptSubmitted', 'codex.user_prompt']);
+// observation was its own turn. Aggregation reads the same set: a turn one of
+// these opened is a prompt, never a render-only reading (src/aggregate.mjs).
+export const TURN_OPENING_EVENTS =new Set(['UserPromptSubmit', 'userPromptSubmitted', 'codex.user_prompt']);
 const SESSION_CLOSING_EVENTS = new Set(['SessionEnd', 'sessionEnd']);
 
 function blankState() {
@@ -32,6 +37,7 @@ function blankState() {
     cacheActivity: {},
     subagentWindows: {},
     turnSeq: {},
+    replyTotals: {},
     pending: {},
     counters: { written: 0, duplicates: 0, errors: 0, collapsed: 0, unkeyed: 0 }
   };
@@ -239,6 +245,13 @@ function trackSubagentWindow(event, state) {
   state.subagentWindows[key] = window;
 }
 
+// Without a provider turn id a turn is numbered by the session's own prompt
+// counter: `seq:0` before any prompt hook, `seq:N` for everything after the Nth.
+// A local counter, never derived from the payload, and kept in state only: the
+// ledger carries no synthetic id, because analysis re-derives the same turns
+// from the prompt hooks when it reads (src/aggregate.mjs, promptSegments), which
+// also corrects a ledger written before this rule. The status line reads these
+// keys to count a reply as the prompt and every call behind it.
 function turnKeyFor(event, state) {
   const seq = state.turnSeq?.[event.agent] ?? 0;
   const turn = event.turn_id ?? `seq:${seq}`;
@@ -347,6 +360,16 @@ function applyCumulativeBilling(event, state) {
     if (moved > 0) delta[unit] = moved;
   }
   if (Object.keys(delta).length) event.billing = delta;
+}
+
+function addUnits(before, moved) {
+  if (!before) return moved;
+  if (!moved) return before;
+  const total = { ...before };
+  for (const [unit, value] of Object.entries(moved)) {
+    if (Number.isFinite(value)) total[unit] = Number(((total[unit] ?? 0) + value).toFixed(6));
+  }
+  return total;
 }
 
 function applyPricing(event, config) {
@@ -515,6 +538,43 @@ function updateState(event, state, turnKey, { replaceLast = false } = {}) {
   }
 }
 
+// The status line shows a reply - a prompt and every call behind it - and used
+// to rebuild it from the live ring, which keeps only the newest RECENT_LIMIT
+// entries of the session: idle renders and tool hooks take slots too, so a long
+// Copilot reply lost its oldest calls (0.66 AIU shown for 1.20), and a report
+// that flushed a held Claude reply mid-way left only the renders after it. Each
+// reply a prompt hook opens now keeps a running total in state instead, the way
+// `pending` keeps `costDelta` for the ledger row: its calls, its billing units
+// and its cost, added from each event's own per-call amounts. A reply that mixes
+// provider figures and estimates is marked `mixed` rather than added across.
+// `replyTotals` is absent from state written before it; the status line then
+// sums the ring as before.
+function openReplyTotal(state, agent, turnKey, event) {
+  state.replyTotals ??= {};
+  const totals = (state.replyTotals[agent] ??= {});
+  if (totals[turnKey]) return;
+  totals[turnKey] = { session_id: event.session_id, turn_id: event.turn_id, ts: event.ts, calls: 0 };
+  const keys = Object.keys(totals);
+  for (const key of keys.slice(0, Math.max(0, keys.length - REPLY_TOTAL_LIMIT))) delete totals[key];
+}
+
+function addToReplyTotal(state, agent, turnKey, event) {
+  const total = state.replyTotals?.[agent]?.[turnKey];
+  if (!total) return;
+  const cost = eventCostAmount(event);
+  if (!event.usage && !event.billing && cost === undefined) return;
+  total.calls += 1;
+  total.ts = event.ts;
+  if (event.billing) total.billing = addUnits(total.billing, event.billing);
+  if (Number.isFinite(cost)) {
+    total.cost ??= { basis: event.cost.basis, delta_usd: 0 };
+    // Provider figures and estimates are never added together; such a reply
+    // shows its newest call's cost, as the ring's sum always did.
+    if (event.cost.basis !== total.cost.basis) total.mixed = true;
+    else total.cost.delta_usd = Number((total.cost.delta_usd + cost).toFixed(12));
+  }
+}
+
 // Folds one event into `state` and collects, in `ledger`, the rows that storing
 // it makes durable. Nothing here touches the disk, which is what lets the same
 // reduction serve a real store and a read-only preview of one.
@@ -544,6 +604,10 @@ function reduceEvent(inputEvent, config, state, ledger) {
 
   const turnKey = turnKeyFor(event, state);
   let stored = true;
+  // Before the held-sample branch below replaces this render's cost and units
+  // with the accumulated ones.
+  if (TURN_OPENING_EVENTS.has(event.event_name)) openReplyTotal(state, agent, turnKey, event);
+  addToReplyTotal(state, agent, turnKey, event);
 
   if (isSample(event)) {
     // Gauge samples are re-reported on every refresh. Hold the newest one for its
@@ -552,6 +616,11 @@ function reduceEvent(inputEvent, config, state, ledger) {
     const open = state.pending[agent][turnKey];
     const accumulated = Number(((open?.costDelta ?? 0) + (event.cost?.delta_usd ?? 0)).toFixed(12));
     if (event.cost && accumulated > 0) event.cost.delta_usd = accumulated;
+    // Billing units are per-render deltas like cost, so they accumulate across
+    // the held renders too. Keeping only the newest render's units lost every
+    // earlier movement of the same reply when it was written.
+    const units = addUnits(open?.event?.billing, event.billing);
+    if (units) event.billing = units;
     state.pending[agent][turnKey] = { event, costDelta: accumulated, firstTs: open?.firstTs ?? event.ts };
     if (open) state.counters.collapsed = (state.counters.collapsed ?? 0) + 1;
     updateState(event, state, turnKey, { replaceLast: true });
@@ -565,14 +634,31 @@ function reduceEvent(inputEvent, config, state, ledger) {
   return { stored, duplicate: false, pending: !stored, event };
 }
 
-export function storeEvent(inputEvent, config) {
+// The read, the reduction, the ledger rows it makes durable and the rewrite of
+// the state file all happen under the session's lock (`src/state-lock.mjs`), so
+// two hooks of one session in the same instant are applied one after the
+// other instead of the second erasing the first.
+//
+// Telemetry must not break the session it watches, so a lock another process
+// holds past the budget does not stop this event: it is stored as it always
+// was, without the lock, and `counters.unlocked_writes` records that it was.
+// The ledger row is appended either way; the ledger is the source of truth,
+// and the worst an unlocked write can do is what every write did before the
+// lock existed - lose one update to the live state if another write overlaps
+// it. Skipping the state update instead would lose this event's contribution
+// every time rather than only on an actual overlap. `doctor` reports the count.
+export function storeEvent(inputEvent, config, { lock: lockOptions } = {}) {
   const stateFile = sessionStateFile(config, inputEvent?.session_id);
-  const state = loadState(config, inputEvent?.session_id);
-  const ledger = [];
-  const result = reduceEvent(inputEvent, config, state, ledger);
-  for (const row of ledger) appendToLedger(row, config);
-  atomicWriteJson(stateFile, state);
-  return result;
+  return withStateLock(stateFile, (lock) => {
+    const state = loadState(config, inputEvent?.session_id);
+    const ledger = [];
+    const result = reduceEvent(inputEvent, config, state, ledger);
+    const unlocked = lock.reason === 'timeout';
+    if (unlocked) state.counters.unlocked_writes = (state.counters.unlocked_writes ?? 0) + 1;
+    for (const row of ledger) appendToLedger(row, config);
+    atomicWriteJson(stateFile, state);
+    return unlocked ? { ...result, unlocked: true } : result;
+  }, lockOptions);
 }
 
 // What storing `events` would leave in a session's state, computed in memory and
@@ -603,15 +689,6 @@ function assertStateReplaceable(file) {
   fs.unlinkSync(probe);
 }
 
-// Durable-write any turn still being sampled. Reports read the ledger, so this
-// has to run before them or the in-flight turn is invisible.
-//
-// It is an optimisation, never a precondition. When the data directory can be
-// read but not written - Codex's default sandbox, a read-only mount - the turns
-// that could not be flushed come back in `unflushed`, exactly the rows a flush
-// would have appended, for the caller to include in memory. `refused` carries
-// the error code so the report can say which of the two happened. Any error that
-// is not a refused write is still thrown: only that one class degrades.
 // One session state file with its pending turns moved onto `ledger`, in memory:
 // the rows a flush of that file would append, and the state it would save.
 function pendingFlushOf(file) {
@@ -627,25 +704,50 @@ export function pendingTurnRows(config) {
   return listSessionStateFiles(config).flatMap((file) => pendingFlushOf(file).ledger);
 }
 
-export function tryFlushPendingTurns(config) {
-  const result = { flushed: 0, unflushed: [], refused: undefined };
+// Durable-write any turn still being sampled. Reports read the ledger, so this
+// has to run before them or the in-flight turn is invisible.
+//
+// It is an optimisation, never a precondition. When the data directory can be
+// read but not written - Codex's default sandbox, a read-only mount - the turns
+// that could not be flushed come back in `unflushed`, exactly the rows a flush
+// would have appended, for the caller to include in memory. `refused` carries
+// the error code so the report can say which of the two happened. Any error that
+// is not a refused write is still thrown: only that one class degrades.
+//
+// Each file is flushed under its session's lock, and read again once the lock is
+// held: a hook of that session may have flushed or changed the same turns in
+// the meantime. When the lock stays busy past its budget the file's turns are
+// not flushed - two flushers appending one pending turn would put it in the
+// ledger twice, for good - and they come back in `unflushed` like a refused
+// write's, counted in `busy`, for the next report to flush.
+export function tryFlushPendingTurns(config, { lock: lockOptions } = {}) {
+  const result = { flushed: 0, unflushed: [], refused: undefined, busy: 0 };
   for (const file of listSessionStateFiles(config)) {
-    const { state, ledger } = pendingFlushOf(file);
-    if (!ledger.length) continue;
+    // Most files have nothing pending; they are not worth taking a lock for.
+    if (!pendingFlushOf(file).ledger.length) continue;
     // Once one write has been refused the rest would be too; asking again per
     // file only multiplies the failures.
-    if (result.refused) { result.unflushed.push(...ledger); continue; }
-    try {
-      assertStateReplaceable(file);
-      for (const row of ledger) appendToLedger(row, config);
-    } catch (error) {
-      if (!isWriteRefused(error)) throw error;
-      result.refused = { code: error.code, error };
-      result.unflushed.push(...ledger);
-      continue;
-    }
-    atomicWriteJson(file, state);
-    result.flushed += ledger.length;
+    if (result.refused) { result.unflushed.push(...pendingFlushOf(file).ledger); continue; }
+    withStateLock(file, (lock) => {
+      const { state, ledger } = pendingFlushOf(file);
+      if (!ledger.length) return;
+      if (lock.reason === 'timeout') {
+        result.busy += 1;
+        result.unflushed.push(...ledger);
+        return;
+      }
+      try {
+        assertStateReplaceable(file);
+        for (const row of ledger) appendToLedger(row, config);
+      } catch (error) {
+        if (!isWriteRefused(error)) throw error;
+        result.refused = { code: error.code, error };
+        result.unflushed.push(...ledger);
+        return;
+      }
+      atomicWriteJson(file, state);
+      result.flushed += ledger.length;
+    }, lockOptions);
   }
   return result;
 }
@@ -658,9 +760,11 @@ export function flushPendingTurns(config) {
   return result.flushed;
 }
 
-export function storeEvents(events, config) {
+// `options.lock` is passed to every `storeEvent`: a status render waits less
+// for its session's lock than a hook does (`STATUS_LOCK_BUDGET_MS`).
+export function storeEvents(events, config, options = {}) {
   const results = [];
-  for (const event of events) results.push(storeEvent(event, config));
+  for (const event of events) results.push(storeEvent(event, config, options));
   return results;
 }
 
@@ -695,11 +799,17 @@ export async function* readEvents(config, filter = {}) {
 // `pending` is what `tryFlushPendingTurns` could not write. Those rows go after
 // the ledger's, which is where a successful flush would have appended them, so a
 // report reads the same whether or not the flush was allowed to happen.
+// One whose row is already in the ledger is not added again: a flush
+// that found its session busy read that turn from state while the process
+// holding the lock had already appended it and not yet rewritten the state, and
+// counting it from both would count it twice. A flushed turn is the pending
+// event itself (`flushableEvent`), so its `event_id` identifies it exactly.
 export async function collectEvents(config, filter = {}, { pending = [] } = {}) {
   const events = [];
   for await (const event of readEvents(config, filter)) events.push(event);
   const matches = eventFilter(filter);
-  for (const event of pending) if (matches(event)) events.push(event);
+  const recorded = pending.length ? new Set(events.map((event) => event.event_id)) : undefined;
+  for (const event of pending) if (matches(event) && !recorded.has(event.event_id)) events.push(event);
   return events;
 }
 

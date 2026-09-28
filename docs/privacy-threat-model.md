@@ -69,6 +69,16 @@ sensitive text; without the hash it would have ended up in `ls` output, backup
 manifests, and cloud-sync indexes, all places a secret outlives the file it
 came from.
 
+The lock beside each state file (`sessions/s_<hash>.lock`, `src/state-lock.mjs`)
+takes the same hashed name. While a write holds it, it contains the writing
+process's id, a hash of the machine's host name, a random token and a time,
+nothing from any payload, and it is deleted when the write is done (or, when
+the agent killed the writing hook, by the session's next write). A takeover of
+a stale lock is made under a second file of the same kind beside it
+(`s_<hash>.lock.takeover`), which exists only for that instant. It is
+created with an exclusive create that refuses an existing path, so a symbolic
+link planted there is never written through.
+
 A hand-run `tokenwatch status` can also take a session id from outside a
 payload: `--session <id>`, or the agent's own session variable
 (`CLAUDE_CODE_SESSION_ID`; `src/host.mjs`, `hostSessionId`). Such an id passes
@@ -273,8 +283,10 @@ averages.
 
 - Session/model/tool identifiers can reveal operational metadata.
 - A local attacker with read access can inspect the event and install files.
-- Concurrent processes can race on the small state snapshot; JSONL events remain
-  the source of truth.
+- Concurrent processes of one session write its state snapshot one at a time,
+  under a lock; a hook that cannot get the lock within 2 s (a status render
+  within 1 s) writes without it rather than hold up the agent, and can then race
+  another write. JSONL events remain the source of truth.
 - Agent configuration formats can change. Hooks fail open and `doctor` should be
   run after upgrades.
 - HMAC project identities are stable within one installation; delete or rotate

@@ -113,7 +113,11 @@ until the group appears. A long session is not rare: one on record ran 34 hours.
 
 That group's row gives `turns`, `first_ts`/`last_ts` (so you can state the span),
 `provider_cost_usd`, and `cost_per_turn_usd` — all genuinely scoped to this
-session, because the grouping key is the session id itself. Its `imported_turns`
+session, because the grouping key is the session id itself. A turn is one prompt
+and its whole answer; for Copilot, whose payloads carry no turn id, its prompt
+hook delimits them. If the row's `undelimited_turns` is above zero, that many
+turns had no prompt hook to delimit them and are single model calls: say so, and
+do not read a per-turn figure from them as a per-prompt one. Its `imported_turns`
 is 0: a session live capture recorded is never imported. Other rows in the same
 ranking may be imported history, with tokens and no cost.
 

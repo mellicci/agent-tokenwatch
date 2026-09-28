@@ -12,7 +12,7 @@ import { readRelayRecord, recordRelayOutcome } from '../src/relay-record.mjs';
 import { claudeCommandChecks, collectionLiveness, runDoctor } from '../src/doctor.mjs';
 import { makeEvent } from '../src/schema.mjs';
 import { appendImportedEvents, sessionStateFile, storeEvent } from '../src/store.mjs';
-import { writeImportRun } from '../src/import/runs.mjs';
+import { markImportRunsUndone, writeImportRun } from '../src/import/runs.mjs';
 import { tempDir, testConfig } from './helpers.mjs';
 
 function installCopilot(root, config) {
@@ -461,6 +461,22 @@ test('retention is judged on the oldest row, including history an import appende
   // rows may be in the ledger, so that date counts too.
   writeImportRun(config, { run_id: 'run-1', mapping_id: 'claude-jsonl-1', agent: 'claude', earliest_planned_ts: '2025-01-01T00:00:00.000Z' });
   assert.equal(check(runDoctor(config, config.installStateFile), 'retention')?.status, 'warn', 'a planned earliest row counts');
+});
+
+// An undone import took its rows out of the ledger, so its earliest row no
+// longer ages it: after an undo doctor said "oldest event is 5d old" of a ledger
+// whose every row was from that day (Windows live test, 2026-09-28).
+test('an undone import no longer counts towards the age of the ledger', () => {
+  const root = tempDir();
+  const config = testConfig(path.join(root, 'state'));
+  config.retentionDays = 90;
+  storeEvent(hook('claude', 'SessionStart', new Date().toISOString()), config);
+  writeImportRun(config, { run_id: 'run-1', mapping_id: 'claude-jsonl-1', agent: 'claude', earliest_ts: '2025-01-01T00:00:00.000Z', finished_at: '2026-09-23T10:00:00.000Z' });
+  assert.equal(check(runDoctor(config, config.installStateFile), 'retention')?.status, 'warn', 'the imported history counts while it is there');
+  markImportRunsUndone(config, { agent: 'claude', mappingId: 'claude-jsonl-1' });
+  const after = check(runDoctor(config, config.installStateFile), 'retention');
+  assert.equal(after?.status, 'ok', after?.detail);
+  assert.match(after.detail, /^oldest event is 0d old/, after.detail);
 });
 
 test('doctor reports the last import per agent, and names the exact undo for one that stopped part-way', () => {
@@ -990,6 +1006,58 @@ test('doctor says a missing Claude Code shell was not checked rather than failin
   assert.equal(hooksRun?.status, 'info', JSON.stringify(checks));
   assert.match(hooksRun.detail, /^PowerShell is not on PATH here, so the 8 Claude Code command\(s\) were not executed/, hooksRun.detail);
   assert.equal(checks.some((check) => check.status === 'error'), false, 'nothing was run, so nothing failed');
+});
+
+// A settings file saved by a Windows editor can start with a UTF-8 byte-order
+// mark. Install edits it in place (the mark stays at offset 0), and Claude Code
+// reads it, but doctor used to parse it with plain JSON.parse, which throws on
+// the mark; an empty catch then skipped every command probe for that install
+// without a word (Windows live test, 2026-09-28). An empty PATH on win32 makes
+// the probe stop at "not executed", which is enough to show the file was read.
+test('a settings file with a byte-order mark still gets its Claude Code commands probed', () => {
+  const root = tempDir();
+  const config = testConfig(path.join(root, 'state'));
+  fs.writeFileSync(paths(root).claudeSettings, '﻿{"env":{"X":"1"}}\n');
+  installClaudeHere(root, config);
+  assert.equal(fs.readFileSync(paths(root).claudeSettings, 'utf8').charCodeAt(0), 0xFEFF, 'install keeps the mark');
+  const { installs } = JSON.parse(fs.readFileSync(config.installStateFile, 'utf8'));
+  const checks = claudeCommandChecks(installs, { PATH: tempDir('tokenwatch-empty-path-') }, 'win32');
+  const hooksRun = checks.find((check) => check.id.endsWith(':claude-hooks-run'));
+  assert.equal(hooksRun?.status, 'info', `the probe was skipped: ${JSON.stringify(checks)}`);
+  assert.match(hooksRun.detail, /^PowerShell is not on PATH here, so the 8 Claude Code command\(s\) were not executed/, hooksRun.detail);
+});
+
+// When the settings file really cannot be read, the probe is not silently
+// dropped either: doctor says the commands were not run, and why, without
+// quoting the file.
+test('a settings file doctor cannot read is reported instead of silently skipping its command probes', () => {
+  const root = tempDir();
+  const config = testConfig(path.join(root, 'state'));
+  const settingsFile = installClaudeHere(root, config);
+  fs.writeFileSync(settingsFile, '{"hooks": SECRET-SETTINGS-TEXT');
+  const { installs } = JSON.parse(fs.readFileSync(config.installStateFile, 'utf8'));
+  const checks = claudeCommandChecks(installs, { PATH: tempDir('tokenwatch-empty-path-') }, 'win32');
+  const hooksRun = checks.find((check) => check.id.endsWith(':claude-hooks-run'));
+  assert.equal(hooksRun?.status, 'warn', `an unreadable settings file must be named: ${JSON.stringify(checks)}`);
+  assert.match(hooksRun.detail, /could not be read here \(unparseable\), so its Claude Code commands were not run/, hooksRun.detail);
+  assert.ok(hooksRun.detail.includes(settingsFile), hooksRun.detail);
+  assert.doesNotMatch(JSON.stringify(checks), /SECRET-SETTINGS-TEXT/, 'the file is named, never quoted');
+});
+
+// A settings file refused at install wrote nothing, and `<key>:claude-settings`
+// already names it with its remedy. The probe must not add a second warning
+// for the same file.
+test('a settings file refused at install is reported once, not again by the command probe', () => {
+  const root = tempDir();
+  const config = testConfig(path.join(root, 'state'));
+  fs.writeFileSync(paths(root).claudeSettings, '{"env": ');
+  installClaudeHere(root, config);
+  const { installs } = JSON.parse(fs.readFileSync(config.installStateFile, 'utf8'));
+  assert.equal(Object.values(installs)[0].claude?.refused, 'unparseable', JSON.stringify(installs));
+  const checks = claudeCommandChecks(installs, { PATH: tempDir('tokenwatch-empty-path-') }, 'win32');
+  assert.deepEqual(checks, [], 'the refusal line already covers this file');
+  const report = runDoctor(config, config.installStateFile);
+  assert.equal(report.checks.filter((check) => check.id.endsWith(':claude-settings')).length, 1, JSON.stringify(report.checks));
 });
 
 // The Windows form starts `node` from PATH. doctor resolves it there instead of

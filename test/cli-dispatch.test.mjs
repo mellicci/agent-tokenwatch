@@ -469,7 +469,7 @@ test('status on a read-only data directory renders the reading it was handed and
   const env = { ...process.env, TOKENWATCH_HOME: home };
   delete env.TOKENWATCH_CONFIG;
   delete env.TOKENWATCH_DATA;
-  const status = (args) => spawnSync(process.execPath, [cli, 'status', '--agent', 'claude', ...args], {
+  const status = (args) => spawnSync(process.execPath, [cli, 'status', '--agent', 'claude', '--ingest-stdin', ...args], {
     input: JSON.stringify(fixture('claude-status-2.json')), encoding: 'utf8', env
   });
   const stateFile = sessionStateFile(config, 'claude-session-1');
@@ -599,7 +599,7 @@ test('a session that cannot be read renders an empty snapshot marked unknown', (
   // The piped branch reads the same file the store just failed on (D19).
   fs.mkdirSync(path.dirname(sessionStateFile(config, 'claude-session-1')), { recursive: true });
   fs.writeFileSync(sessionStateFile(config, 'claude-session-1'), '{ not json');
-  const piped = JSON.parse(statusRun(home, ['--json'], { input: JSON.stringify(fixture('claude-status-1.json')) }).stdout);
+  const piped = JSON.parse(statusRun(home, ['--ingest-stdin', '--json'], { input: JSON.stringify(fixture('claude-status-1.json')) }).stdout);
   assert.equal(piped.latest, undefined);
   assert.deepEqual(piped.session_scope, { basis: 'unknown', state_found: false });
 });
@@ -618,7 +618,7 @@ test('the fallback note is printed only over a session that was found', () => {
 
 test('a piped payload decides the session, and its render is unchanged apart from session_scope', () => {
   const { home, config } = twoSessionHome();
-  const piped = JSON.parse(statusRun(home, ['--json', '--session', 'A'], {
+  const piped = JSON.parse(statusRun(home, ['--ingest-stdin', '--json', '--session', 'A'], {
     input: JSON.stringify(fixture('claude-status-1.json')), env: { CLAUDE_CODE_SESSION_ID: 'B' }
   }).stdout);
   assert.equal(piped.latest.session_id, 'claude-session-1');
@@ -637,11 +637,11 @@ test('a piped payload decides the session, and its render is unchanged apart fro
   }, config);
   const anonymous = { ...fixture('claude-status-1.json') };
   delete anonymous.session_id;
-  const unkeyed = JSON.parse(statusRun(home, ['--json'], { input: JSON.stringify(anonymous) }).stdout);
+  const unkeyed = JSON.parse(statusRun(home, ['--ingest-stdin', '--json'], { input: JSON.stringify(anonymous) }).stdout);
   assert.deepEqual(unkeyed.session_scope, { basis: 'stdin', state_found: true });
   assert.equal(unkeyed.latest.session_id, undefined);
   assert.equal(unkeyed.latest.usage.input_total, 8000);
-  assert.doesNotMatch(statusRun(home, [], { input: JSON.stringify(anonymous) }).stdout, /note:/);
+  assert.doesNotMatch(statusRun(home, ['--ingest-stdin'], { input: JSON.stringify(anonymous) }).stdout, /note:/);
 
   // D4: the piped path renders exactly what the unchanged statusState gives.
   const { session_scope: _scope, ...rest } = piped;

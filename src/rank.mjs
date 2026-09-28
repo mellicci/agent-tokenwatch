@@ -1,4 +1,4 @@
-import { groupTurns } from './aggregate.mjs';
+import { maximum, turnReadings, turnsOf } from './aggregate.mjs';
 
 // Ranked cost drivers, computed here rather than left to a reader to total up by
 // eye. Every share in a retrospective should come from this module: a model
@@ -25,12 +25,16 @@ function percentile(values, p) {
   return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1)];
 }
 
+// Every function here takes the period's rows, and optionally `readings`, the
+// same rows already grouped by turnReadings(): a report groups its period once
+// and hands the result to each section instead of each grouping it again.
+
 // Provider-reported charges and locally configured estimates are ranked in
 // separate columns and never summed, so a period mixing both cannot silently
 // present an estimate as a bill.
-export function rankGroups(events, { by = 'session', limit = 10 } = {}) {
+export function rankGroups(events, { by = 'session', limit = 10, readings } = {}) {
   if (!GROUPINGS.has(by)) throw new Error(`Unknown grouping: ${by}. Use one of ${[...GROUPINGS].join(', ')}.`);
-  const turns = groupTurns(events);
+  const turns = turnsOf(readings ?? turnReadings(events));
   const totalProvider = turns.reduce((sum, turn) => sum + turn.provider_cost_usd, 0);
   const totalEstimate = turns.reduce((sum, turn) => sum + turn.estimated_cost_usd, 0);
   // A provider that bills in units rather than currency - Copilot's AI units and
@@ -46,20 +50,24 @@ export function rankGroups(events, { by = 'session', limit = 10 } = {}) {
   for (const turn of turns) {
     const key = groupKey(turn, by);
     const row = map.get(key) ?? {
-      key, turns: 0, imported_turns: 0, provider_cost_usd: 0, estimated_cost_usd: 0, billing: {},
+      key, turns: 0, imported_turns: 0, undelimited_turns: 0, provider_cost_usd: 0, estimated_cost_usd: 0, billing: {},
       first_ts: turn.first_ts, last_ts: turn.last_ts, models: new Set(), sessions: new Set()
     };
     row.turns += 1;
     // Imported turns carry no provider cost, so a group made of them would
     // otherwise rank as free (intent 06, D4).
     if (turn.imported) row.imported_turns += 1;
+    // A turn no turn id or prompt hook delimited is one model call, not one
+    // prompt; a group's turn count says how many of those it holds.
+    else if (turn.delimited_by === 'row') row.undelimited_turns += 1;
     row.provider_cost_usd += turn.provider_cost_usd;
     row.estimated_cost_usd += turn.estimated_cost_usd;
     for (const [unitName, value] of Object.entries(turn.billing ?? {})) {
       row.billing[unitName] = (row.billing[unitName] ?? 0) + value;
     }
-    if (new Date(turn.first_ts) < new Date(row.first_ts)) row.first_ts = turn.first_ts;
-    if (new Date(turn.last_ts) > new Date(row.last_ts)) row.last_ts = turn.last_ts;
+    // Compared as the ISO strings every event carries, as turnReadings() does.
+    if (turn.first_ts < row.first_ts) row.first_ts = turn.first_ts;
+    if (turn.last_ts > row.last_ts) row.last_ts = turn.last_ts;
     if (turn.model) row.models.add(turn.model);
     if (turn.session_id) row.sessions.add(turn.session_id);
     map.set(key, row);
@@ -107,8 +115,8 @@ export function rankGroups(events, { by = 'session', limit = 10 } = {}) {
 
 // How concentrated spend is. A period where the top tenth of turns carries most
 // of the cost is a different problem from one where every turn is expensive.
-export function turnConcentration(events) {
-  const turns = groupTurns(events).filter((turn) => turn.provider_cost_usd > 0);
+export function turnConcentration(events, { readings } = {}) {
+  const turns = turnsOf(readings ?? turnReadings(events)).filter((turn) => turn.provider_cost_usd > 0);
   const costs = turns.map((turn) => turn.provider_cost_usd);
   const total = costs.reduce((sum, value) => sum + value, 0);
   const sorted = [...costs].sort((a, b) => b - a);
@@ -135,13 +143,13 @@ export function compactionSummary(events) {
     count: compactions.length,
     sessions: sessions.size,
     context_percent_median: percentile(percents, 0.5),
-    context_percent_max: percents.length ? Math.max(...percents) : undefined,
+    context_percent_max: maximum(percents),
     measured: percents.length
   };
 }
 
-function periodTotals(events) {
-  const turns = groupTurns(events);
+function periodTotals(events, readings) {
+  const turns = turnsOf(readings);
   const provider = turns.reduce((sum, turn) => sum + turn.provider_cost_usd, 0);
   const costed = turns.filter((turn) => turn.provider_cost_usd > 0);
   const sessions = new Set(turns.map((turn) => turn.session_id).filter(Boolean));
@@ -163,12 +171,16 @@ function delta(current, prior) {
 // Period-over-period movement. A retrospective's actual question is "versus
 // what", and an equal-length window immediately before the current one is the
 // only comparison the ledger can support without assumptions.
-export function comparePeriods(currentEvents, priorEvents) {
-  const current = periodTotals(currentEvents);
-  const prior = periodTotals(priorEvents);
+export function comparePeriods(currentEvents, priorEvents, { current: currentReadings, prior: priorReadings } = {}) {
+  const grouped = {
+    current: currentReadings ?? turnReadings(currentEvents),
+    prior: priorReadings ?? turnReadings(priorEvents)
+  };
+  const current = periodTotals(currentEvents, grouped.current);
+  const prior = periodTotals(priorEvents, grouped.prior);
   const byModel = new Map();
   for (const [label, events] of [['current', currentEvents], ['prior', priorEvents]]) {
-    for (const row of rankGroups(events, { by: 'model', limit: Number.MAX_SAFE_INTEGER }).groups) {
+    for (const row of rankGroups(events, { by: 'model', limit: Number.MAX_SAFE_INTEGER, readings: grouped[label] }).groups) {
       const entry = byModel.get(row.key) ?? { model: row.key, current: 0, prior: 0 };
       entry[label] = row.provider_cost_usd;
       byModel.set(row.key, entry);

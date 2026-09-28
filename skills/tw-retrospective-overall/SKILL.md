@@ -125,6 +125,26 @@ For an agent whose data is mostly increments, this is the field with the real
 context-growth signal; `context_samples` will be thin or empty there by
 design, not because the agent lacks the data.
 
+A turn is one prompt and its whole answer, however many model calls (tool
+round-trips) that answer took, so `turns`, `turn_share`, `cost_per_turn_usd`
+and AIU per turn are per prompt. Claude names each prompt; Copilot names none,
+so its turns are delimited by its prompt hook: every call after a
+`userPromptSubmitted` belongs to that prompt's turn. Where neither delimits a
+turn - hooks not installed, or a window that starts mid-reply - each call is
+counted as a turn of its own, and `aggregate.undelimited_turns` (and each
+`--group-by` row's `undelimited_turns`) says how many. Above zero, say that
+those turns are per call, not per prompt, and do not compare their per-turn
+figures with per-prompt ones.
+
+`aggregate.turns` counts turns with a model call behind them. A status-line
+render with none - a slash command such as `/status` or `/cost`, the render
+after `/compact`, the render before the first prompt, or a Copilot render whose
+counters did not move - is counted in `aggregate.render_only_readings` instead,
+and in no turn count, cost per turn, ranking or comparison. Its context reading
+stays in both context series, so `context_samples.turns` and
+`context_percent_samples.turns` count readings, not turns, and can be larger
+than `aggregate.turns`.
+
 If a retrospective quotes a period token total for a sample-dominated agent as
 live usage, it is wrong. Quote cost totals and context distributions instead.
 When `aggregate.imported_turns` is above zero, the token total is imported

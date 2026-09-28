@@ -153,6 +153,17 @@
 
 ### Doctor
 
+- **An undone import no longer ages the ledger in `doctor`'s retention line.**
+  The check counted the earliest row of every import run, including one whose
+  rows `--undo` had removed, so it reported history the ledger no longer held.
+- **`doctor` probes a Claude Code install whose settings file starts with a
+  byte-order mark.** Windows editors save one; install handled it, but doctor
+  parsed the file with plain `JSON.parse`, failed, and silently dropped the
+  `claude-hooks-run` and `claude-status-run` probes for that install. It now
+  reads the file with the installer's own parser, and a settings file it still
+  cannot read is named in a `claude-hooks-run` warning instead of skipped.
+  Every JSON file Tokenwatch reads (config, install record, state) now
+  tolerates a leading byte-order mark.
 - **`tokenwatch doctor` survives a corrupt session state file and creates
   nothing.** A truncated `sessions/*.json` used to stop it with
   `Cannot read JSON` and no report; each unreadable file is now named in a
@@ -192,6 +203,12 @@
 
 ### Status line
 
+- **A hand-run `tokenwatch status` no longer waits on stdin.** It used to read
+  stdin whenever it was not a terminal, so a caller that left a pipe open - an
+  agent's shell tool, a CI step, `ssh -T` - hung it indefinitely. Only
+  `--ingest-stdin` reads stdin now; every installed status line, the wrapper
+  template and the documented setups already pass it. A hand-written status
+  line that pipes a payload without the flag must add it.
 - **`tokenwatch status` run by hand now reports the session that asked, or says
   it could not.** Before, with no payload on stdin it silently showed whichever
   session last wrote to the machine, so with two sessions open a retrospective
@@ -228,6 +245,121 @@
   hands-on Windows test.
 
 ### Accounting and correctness
+
+- **Fixed: every Copilot model call was counted as a turn.** Copilot sends no
+  turn or prompt id, so each movement of its cumulative counters - one model
+  call - was a turn of its own: a Windows live test showed 16 turns for a
+  session of three prompts whose AIU and premium requests matched Copilot
+  exactly. A turn is one prompt and its whole answer, however many tool
+  round-trips it takes, and a row with no turn id now belongs to the turn its
+  session's latest prompt hook (`userPromptSubmitted`) opened, in time order.
+  `turns`, `turn_share`, `cost_per_turn_usd`, AIU per turn, concentration and
+  `--compare` are per prompt for Copilot; billing totals, AIU shares and
+  `ranked_by: billing:aiu` are unchanged, and every context reading is kept.
+  It is decided when reading, so existing ledgers are regrouped without a
+  migration. Where no prompt hook delimits a call (hooks not installed, or a
+  `--since` that starts mid-reply) it stays a turn of its own, and
+  `aggregate.undelimited_turns` and each `--group-by` row's
+  `undelimited_turns` say how many; the coverage finding says so too. Claude
+  turns, which carry prompt ids, and imported rows are unchanged. Codex OTLP
+  rows that carry no turn id are grouped the same way, by their session's
+  `codex.user_prompt` event, where each used to be a turn of its own. The
+  status line counts a Copilot reply the same way: `this reply` is the current
+  prompt's calls so far and `previous reply` the whole prompt before it, where
+  both used to show the last single call.
+- **Fixed: the status line showed less of a long reply than `analyze` did.**
+  `this reply` and `previous reply` were rebuilt from the session's live ring,
+  which keeps its newest 200 entries, idle renders and tool hooks included: a
+  Copilot reply of 120 calls showed 0.66 AIU where `analyze` counted 1.20. And
+  a report (`analyze`, `agents`, `export`) run in the middle of a held Claude
+  reply flushed it, after which `this reply` showed only the cost since the
+  flush ($0.05 of $0.15). The store now keeps a running total of each reply a
+  prompt hook opens in session state, as it keeps the held turn's cost for the
+  ledger, and the status line reads it. A state file written before this falls
+  back to the ring, as does a reply with no prompt hook.
+- **Fixed: inside one turn, the latest reading followed the file, not the
+  clock.** Turns were delimited in time order, but a turn's latest context
+  reading, gauge and model were the last row in the file, so a reversed ledger
+  reported 56% as the latest context reading instead of 58%. Rows are now read
+  in time order throughout.
+- **Fixed: a long period could fail with `RangeError: Maximum call stack size
+  exceeded`.** The context and compaction maxima spread every reading into one
+  `Math.max` call, which fails past roughly 125,000 readings; every render-only
+  reading is kept since the change below, which made that easier to reach.
+- **Reports on long periods stay fast.** Grouping by prompt and judging each
+  gap against the session's reported TTL, both in this release, first made
+  `analyze --group-by session --compare` on 100,000 rows plus an equal prior
+  window take 42 s, against 2.3 s before them: each section of the report
+  grouped the whole period into turns again (about eight times), and each gap
+  scanned every TTL report of its session. The period is now grouped once and
+  handed to each section, and a gap's TTL is found by binary search: 1.3 s.
+- **Changed: the audit calls gauge counts readings.** "2 turns ... 3 carry
+  latest-call gauge samples" and "Latest-call gauge samples (3 turns)" counted
+  render-only readings, which are not turns. The coverage finding now says
+  "3 latest-call gauge readings were recorded, including any that are not
+  turns", and the Markdown and `context-percent` finding say "readings". The
+  JSON fields keep their names.
+- **Fixed: a status-line reply held as gauge samples kept only its last
+  render's billing units.** Cost accumulated across the renders of one held
+  reply; AIU and premium requests did not, so a Copilot payload with a per-call
+  gauge lost every earlier movement of the reply when it was written. Units now
+  accumulate the same way.
+
+- **Fixed: status-line renders with no model call behind them were counted as
+  turns.** Claude Code gives `/status`, `/cost`, `/context`, the render after
+  `/compact` and the render before the first prompt a prompt id of their own.
+  Grouped by that id, each became a turn that cost nothing: a live session on
+  Windows showed 16 turns for 8 prompts and 4 billed background-agent
+  notification turns, which lowered `cost_per_turn_usd` and every per-turn
+  comparison built on it. A group made only of status-line readings, backed by
+  no prompt hook, that moved no cost, estimate or billing units and repeats the
+  session's previous gauge is now a render-only reading: `analyze` counts it in
+  `aggregate.render_only_readings`, keeps its context reading in
+  `context_samples` and `context_percent_samples`, and leaves it out of turns,
+  cost and model breakdowns, `--group-by` rows, concentration and `--compare`;
+  the coverage finding says how many there were. Costs were right before and
+  are unchanged. It is decided when reading, so existing ledgers are corrected
+  without a migration. A Copilot render whose counters did not move is a
+  render-only reading by the same rule, so Copilot periods no longer count one
+  turn per idle render; imported and Codex turns never are. The status line
+  applies the same rule: such a render is no longer the reply in flight, the
+  previous reply at $0, or a slot in the `averagingWindow` average.
+- **Fixed: `analyze` judged idle gaps against the configured cache TTL when the
+  provider reported one.** Claude Code reported a one-hour TTL, the audit used
+  the configured 300 s, and six gaps were flagged as possibly cold when none
+  were. Each session's gaps are now judged against the TTL the provider
+  reported in that session, and against `cacheTtlSeconds` only where none was
+  reported. The `ttl-gaps` finding says which in its text, naming a configured
+  TTL as an assumption, and in `ttl_sources`; `methodology.cache_ttl_basis`
+  states the rule.
+- **Fixed: hooks that fire at the same instant lost each other's update to the
+  session state.** Every hook is its own process, and each read the session's
+  state file, changed it and wrote it back whole, so of two simultaneous writes
+  the second erased the first. Claude Code launching two background subagents
+  showed "1 completed" on the status line: one of the two `SubagentStart`
+  updates was lost, the first stop completed the only start left, and every
+  later stop was ignored as having nothing running. The ledger held all the
+  rows. Ten simultaneous starts reproduced it as 9, 7 and 7. Each session's
+  state is now read, reduced and rewritten under a lock file beside it
+  (`sessions/s_<hash>.lock`), taken with an exclusive create that works the
+  same on Windows and never follows a link, released when the write is done,
+  and taken over by the session's next write when its holder has exited (a
+  hook the agent killed leaves its lock until then) or has held it for more
+  than ten seconds, twice the hook timeout. Takeovers are made one at a time
+  and never remove a fresh lock that took a stale one's place. A hook waits
+  at most 2 s for the lock, a status render 1 s; the first cut's 300 ms ran
+  out on a loaded machine. If another process still holds it, the event is
+  stored anyway, the way every event was before the lock existed, and
+  counted: `doctor` reports `session-state:unlocked-writes` until the next
+  `tokenwatch repair`, which resets it. Only such a write can still lose an
+  update, so the state is exact while every write gets the lock in time. A
+  lock left in a directory this process cannot write is not waited for. A
+  report that finds a session busy leaves its in-flight turn for the next
+  flush rather than risk appending it twice, and includes it from memory,
+  once. `tokenwatch repair` corrects subagent counts under the same lock. A
+  test starts 16 real hook processes at once and checks every start and stop
+  is counted whenever every write held the lock, which it does pinned to one
+  CPU.
 
 - **Fixed: reporting commands failed inside a sandbox that cannot write
   `~/.tokenwatch`.** `agents`, `analyze`, `export` and `repair` flush the
@@ -476,6 +608,10 @@ has a regression test that fails without its fix.
 
 ### Repository
 
+- **`npm test` refuses to pass where there are no tests.** The npm package
+  ships without `test/`, and `node --test` with nothing to run reported 0 tests
+  and succeeded, so a green run of the packaged copy tested nothing. It now
+  exits 1 and says the tests run from the repository or the release zip.
 - **Added: a dated platform and agent support matrix.** The README said
   Windows was "tested by CI but not yet by hand" and nothing about macOS, WSL,
   or which agents had ever been seen working where. Its new *Platform and agent

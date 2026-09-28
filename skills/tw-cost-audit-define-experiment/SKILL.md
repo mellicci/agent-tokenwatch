@@ -117,7 +117,9 @@ two overlapping changes make both unmeasurable.
 5. Never promise savings without a counterfactual. State a test, baseline,
    success metric, and rollback instead — and record it in the journal.
 6. Treat the configured cache TTL as an assumption unless the event explicitly
-   says it is provider-reported.
+   says it is provider-reported. The `ttl-gaps` finding says which TTL it
+   judged each gap against (`ttl_sources`): a session's provider-reported TTL
+   where it had one, the configured value only where it did not.
 7. Shares and ranks come from `--group-by`, computed in code. Do not total CSV
    columns by eye.
 

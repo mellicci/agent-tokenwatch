@@ -63,9 +63,11 @@ export function isWriteRefused(error) {
   return WRITE_REFUSED.has(error?.code);
 }
 
+// A leading UTF-8 byte-order mark is not part of the JSON: Windows editors
+// (and PowerShell 5.1's `Out-File`) write one, and JSON.parse rejects it.
 export function readJson(file, fallback = null) {
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
+    return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
   } catch (error) {
     if (error?.code === 'ENOENT') return fallback;
     throw new Error(`Cannot read JSON ${file}: ${error.message}`);

@@ -21,6 +21,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
+    "pretest": "node -e \"require('fs').existsSync('test')||(console.error('tokenwatch: no test/ directory here. The npm package ships without its tests; run them from the repository or the release zip.'),process.exit(1))\"",
     "test": "node --test",
     "test:coverage": "node --test --experimental-test-coverage",
     "smoke": "node ./scripts/smoke.mjs",

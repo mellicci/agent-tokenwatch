@@ -74,14 +74,92 @@ A `cache` block is only present when the provider reported cache state; its
 `ttl_source` records whether the numbers were measured or assumed. When the
 provider also reports a cache hit ratio, it arrives as `hit_rate`, normalized
 to a 0-1 fraction even when the source reported a percentage
-(`src/normalize/claude.mjs`, `claudeCache`).
+(`src/normalize/claude.mjs`, `claudeCache`). `analyze` judges a within-session
+gap against the TTL the provider reported for that session, and against the
+configured `cacheTtlSeconds` only for a session that reported none. Its
+`ttl-gaps` finding says which, in its text and in `ttl_sources`
+(`provider_reported_gaps`, `provider_ttl_seconds`, `configured_gaps`,
+`configured_ttl_seconds`); a configured TTL is named as an assumption.
+
+## Turns and render-only readings
+
+A turn is one prompt and the whole answer to it, however many model calls
+(tool round-trips) that answer takes. Rows are grouped into turns:
+
+- by `turn_id` where the agent supplies one (Claude's prompt id);
+- otherwise by the prompt hook (`UserPromptSubmit`, `userPromptSubmitted`,
+  `codex.user_prompt`): a row with no `turn_id` belongs to the turn the latest
+  prompt hook of the same session opened, in `ts` order rather than file
+  order. This is how Copilot, whose payloads carry no turn or prompt id, gets
+  one turn per prompt instead of one per model call. The prompt hook must
+  carry the session id the status line sends;
+- otherwise per row. That is a row before the first prompt hook of its
+  session among the rows read (hooks not installed, or a `--since` that starts
+  mid-reply), and a row with no `session_id`. `analyze` counts these as
+  `aggregate.undelimited_turns`, and each `--group-by` row as its own
+  `undelimited_turns`; for Copilot each is one model call. An imported row
+  (`source: "import"`) is always a turn of its own - one response, or for
+  Copilot one session summary - and is not counted there.
+
+The rows of a turn are read in `ts` order too, so what a turn keeps as its
+latest - its sample gauge, its context reading, its model - is the latest in
+time, wherever the rows sit in the file.
+
+The ledger carries no synthetic turn id: turns are derived when the ledger is
+read, so a ledger written before prompt delimiting existed is regrouped
+without a migration. The status line applies the same rule from session state,
+where the store numbers each session's prompts with a local counter and keeps a
+running total of each reply a prompt hook opened (`replyTotals`: its calls,
+billing units and cost, never adding a configured estimate to a provider
+figure). `this reply` and `previous reply` come from
+that total, so a reply is whole however many renders and hooks it spans, and
+after a report has flushed part of it to the ledger. A state file written
+before the total existed falls back to what its live ring still holds.
+
+Claude Code also gives a prompt id to renders with no model call behind them:
+a slash command such as `/status`, `/cost` or `/context`, the render after
+`/compact`, and the render before the first prompt. Such a group is a
+**render-only reading**, not a turn, when all of these hold:
+
+- every row in it is a status-line reading (`source: "statusline"`, with
+  `basis: "sample"` or no usage at all);
+- no prompt hook (`UserPromptSubmit`, `userPromptSubmitted`,
+  `codex.user_prompt`) carries its turn id;
+- it moved no provider cost, no configured estimate and no billing units;
+- its token gauge, if it has one, equals the previous reading's in the same
+  session. The first reading of a session has nothing to compare with and is
+  render-only when it moved no cost, since the first cumulative cost
+  observation is a baseline.
+
+`analyze` reports these as `aggregate.render_only_readings` and leaves them out
+of `turns`, the cost and model breakdowns, `increment_turns`, rankings
+(`--group-by` turn counts and `cost_per_turn_usd`), concentration and
+`--compare`. Their context readings stay in `context_samples` and
+`context_percent_samples`, whose `turns` count every reading and can be larger
+than `aggregate.turns`; the audit's text calls them readings. The rule is applied when reading, so a ledger written
+before it existed is read correctly without a migration.
+
+By agent: a Copilot render that moved nothing - the first one of a session,
+or any whose cumulative counters did not change - carries no usage, billing or
+cost. Before the session's first prompt hook it is a render-only reading;
+after one it is part of that prompt's turn, and its context reading is kept.
+One that moved tokens carries an `increment` and always belongs to a turn.
+Codex sends nothing through a status line, and an imported row has
+`source: "import"`, so neither is ever render-only.
+
+A turn a prompt hook delimited keeps every context reading of its rows in
+`context_percent_samples`; a turn with a `turn_id` contributes its last, as it
+always did.
 
 ## Billing units
 
 Not every provider bills in currency. Copilot CLI reports AI units and premium
 requests and no dollars at all. Those arrive in `billing_cumulative` as
 provider-reported running totals and are diffed into `billing` per call, exactly
-as cumulative cost and cumulative tokens are.
+as cumulative cost and cumulative tokens are. A turn's `billing` is the sum of
+its calls' deltas, so AIU per turn is AIU per prompt. A gauge-shaped row that
+the store holds for a whole reply carries the units every render of that reply
+moved, not only the last one's.
 
 They are deliberately not part of `cost`: a unit that is not money must never be
 added to money, rendered with a currency symbol, or compared against a configured

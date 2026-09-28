@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeClaude } from '../src/normalize/claude.mjs';
 import { normalizeCopilot } from '../src/normalize/copilot.mjs';
-import { rollingStatusFromState } from '../src/aggregate.mjs';
+import { aggregateEvents, rollingStatusFromState } from '../src/aggregate.mjs';
+import { comparePeriods, rankGroups, turnConcentration } from '../src/rank.mjs';
 import { formatStatus } from '../src/format.mjs';
 import { flushPendingTurns, loadState, resolveStatusSession, sessionStateFile, statusState, storeEvent, storeEvents, tryFlushPendingTurns } from '../src/store.mjs';
 import { isWriteRefused } from '../src/fs-util.mjs';
@@ -229,6 +230,158 @@ test('last prompt reports the last completed exchange, not the one in flight', (
   // The partial must not drag the average down.
   assert.ok(Math.abs(snapshot.average_provider_cost_usd - 2) < 1e-9,
     `average should exclude the partial, got ${snapshot.average_provider_cost_usd}`);
+});
+
+// A report flushes the reply in flight to the ledger mid-reply, and the renders
+// after it start a new held row for the same prompt. The status line showed only
+// what came after the flush (0.05 of a 0.15 reply); `analyze` always summed both
+// rows. The reply's running total in session state survives the flush.
+test('a report flushing the reply in flight does not shrink what the status line shows for it', () => {
+  const config = testConfig(tempDir());
+  const render = (cost, input) => storeEvent(normalizeClaude('status', {
+    session_id: 's', prompt_id: 'p1', model: { id: 'claude-test-model' }, cost: { total_cost_usd: cost },
+    context_window: { used_percentage: 5, current_usage: { input_tokens: input, output_tokens: 1 } }
+  }, config, 'statusline')[0], config);
+  render(1, 1);                   // baseline: 1.00 spent before this session was seen
+  storeEvent(normalizeClaude('UserPromptSubmit', { session_id: 's', prompt_id: 'p1' }, config, 'hook')[0], config);
+  render(1.05, 2);
+  render(1.1, 3);
+  tryFlushPendingTurns(config);   // `analyze`, `agents` or `export` ran mid-reply
+  render(1.15, 4);
+
+  const snapshot = rollingStatusFromState(statusState(config, 's'), config, 'claude');
+  assert.ok(Math.abs(snapshot.in_flight_cost_usd - 0.15) < 1e-9,
+    `the whole reply so far, got ${snapshot.in_flight_cost_usd}`);
+  flushPendingTurns(config);
+  const reply = aggregateEvents(ledgerLines(config)).turns_data.find((turn) => turn.turn_id === 'p1');
+  assert.ok(Math.abs(reply.provider_cost_usd - 0.15) < 1e-9, `analyze agrees, got ${reply.provider_cost_usd}`);
+});
+
+// F3, Windows live test on Claude Code 2.1.283: 16 turns for 8 prompts plus 4
+// billed background-agent notification turns. The other 4 were status-line
+// renders with a new prompt id and nothing behind them - the baseline render
+// before the first prompt, and the renders after /status, /cost and /compact -
+// each counted as a zero-cost turn. The sequence below is that session's shape.
+function claudeLiveSession(config) {
+  const at = (minute) => `2026-09-28T12:${String(minute).padStart(2, '0')}:00.000Z`;
+  const status = (prompt, minute, cost, percent, usage) => storeEvent(normalizeClaude('status', {
+    session_id: 's', prompt_id: prompt, timestamp: at(minute), model: { id: 'claude-test-model' },
+    cost: { total_cost_usd: cost },
+    context_window: { used_percentage: percent, current_usage: usage ?? null }
+  }, config, 'statusline')[0], config);
+  const hook = (name, prompt, minute) => storeEvent(normalizeClaude(name, {
+    session_id: 's', prompt_id: prompt, timestamp: at(minute)
+  }, config, 'hook')[0], config);
+  const first = { input_tokens: 3, cache_creation_input_tokens: 4000, cache_read_input_tokens: 36000, output_tokens: 20 };
+  const second = { input_tokens: 2, cache_creation_input_tokens: 40, cache_read_input_tokens: 41000, output_tokens: 4 };
+  const third = { input_tokens: 5, cache_creation_input_tokens: 5600, cache_read_input_tokens: 31800, output_tokens: 60 };
+
+  status('boot', 0, 0, 0);                       // baseline render before the first prompt
+  hook('UserPromptSubmit', 'p1', 1);
+  status('p1', 2, 0.05, 4, first);               // a real call, 0.05
+  hook('Stop', 'p1', 2);
+  status('slash-status', 3, 0.05, 4, first);     // /status: new prompt id, same gauge, no cost
+  hook('UserPromptSubmit', 'p2', 4);
+  status('p2', 5, 0.12, 4, second);              // a real call, 0.07
+  hook('Stop', 'p2', 5);
+  status('slash-cost', 6, 0.12, 4, second);      // /cost and /context
+  hook('PreCompact', 'compact', 7);
+  hook('SessionStart', 'compact', 7);
+  hook('SubagentStop', 'compact', 7);            // a late stop landed here in the live run
+  status('compact', 8, 0.12, 3, second);         // the render after /compact
+  hook('UserPromptSubmit', 'notify', 9);         // Claude Code's background-agent notification
+  status('notify', 10, 0.15, 5, third);          // a real, billed call, 0.03
+  hook('Stop', 'notify', 10);
+  flushPendingTurns(config);
+  return ledgerLines(config);
+}
+
+test('status-line renders with no model call behind them are not counted as turns', () => {
+  const config = testConfig(tempDir());
+  const events = claudeLiveSession(config);
+  const aggregate = aggregateEvents(events);
+
+  assert.equal(aggregate.turns, 3, `two prompts and one notification turn, got ${aggregate.turns}`);
+  assert.equal(aggregate.render_only_readings, 4, 'the baseline, /status, /cost and post-compact renders');
+  assert.ok(Math.abs(aggregate.cost.provider_reported_usd - 0.15) < 1e-9,
+    `the session total is unchanged, got ${aggregate.cost.provider_reported_usd}`);
+  assert.equal(aggregate.cost.provider_turns, 3, 'no zero-cost render is counted as a costed turn');
+  assert.ok(Math.abs(aggregate.cost.average_provider_turn_usd - 0.05) < 1e-9,
+    `got ${aggregate.cost.average_provider_turn_usd}`);
+  assert.equal(Object.values(aggregate.models).reduce((sum, row) => sum + row.turns, 0), 3);
+  assert.deepEqual(aggregate.turns_data.map((turn) => turn.turn_id), ['p1', 'p2', 'notify']);
+
+  // Every render is still a context reading: nothing measured is thrown away.
+  assert.equal(aggregate.context_percent_samples.turns, 7);
+  assert.equal(aggregate.context_percent_samples.percent_last, 5);
+  assert.equal(aggregate.context_samples.turns, 6, 'every render that carried a token gauge');
+
+  const ranked = rankGroups(events, { by: 'session' });
+  assert.equal(ranked.turns, 3);
+  assert.equal(ranked.groups[0].turns, 3);
+  assert.ok(Math.abs(ranked.groups[0].cost_per_turn_usd - 0.05) < 1e-9,
+    `cost per turn divides by real turns, got ${ranked.groups[0].cost_per_turn_usd}`);
+  assert.ok(Math.abs(ranked.total_provider_usd - 0.15) < 1e-9);
+  assert.equal(turnConcentration(events).turns, 3);
+
+  const comparison = comparePeriods(events, []);
+  assert.equal(comparison.turns.current, 3);
+  assert.ok(Math.abs(comparison.cost_per_turn_usd.current - 0.05) < 1e-9);
+});
+
+// The same renders on the live status line: a /status render became the "turn"
+// in flight while idle, and once the next prompt flushed it, the "previous
+// reply" at $0 and a slot in the averaging window.
+test('a render with no model call behind it is never the previous reply or part of the average', () => {
+  const config = { ...testConfig(tempDir()), averagingWindow: 2 };
+  const gauge = (output) => ({ input_tokens: 2, cache_read_input_tokens: 9000, output_tokens: output });
+  const status = (prompt, cost, usage) => storeEvent(normalizeClaude('status', {
+    session_id: 's', prompt_id: prompt, model: { id: 'claude-test-model' }, cost: { total_cost_usd: cost },
+    context_window: { used_percentage: 5, current_usage: usage }
+  }, config, 'statusline')[0], config);
+  const prompt = (id) => storeEvent(normalizeClaude('UserPromptSubmit', { session_id: 's', prompt_id: id }, config, 'hook')[0], config);
+
+  status('boot', 1, gauge(1));   // baseline: 1.00 already spent before this session was seen
+  prompt('p1');
+  status('p1', 1.05, gauge(10)); // 0.05
+  prompt('p2');
+  status('p2', 1.12, gauge(20)); // 0.07
+  status('slash-status', 1.12, gauge(20));
+
+  const idle = rollingStatusFromState(statusState(config), config, 'claude');
+  assert.ok(Math.abs(idle.in_flight_cost_usd - 0.07) < 1e-9,
+    `a /status render does not change what the line shows, got ${idle.in_flight_cost_usd}`);
+  assert.ok(Math.abs(idle.last_prompt_cost_usd - 0.05) < 1e-9, `got ${idle.last_prompt_cost_usd}`);
+
+  prompt('p3');
+  status('p3', 1.2, gauge(30));  // 0.08, still in flight
+  const next = rollingStatusFromState(statusState(config), config, 'claude');
+  assert.ok(Math.abs(next.last_prompt_cost_usd - 0.07) < 1e-9,
+    `the previous reply is p2, not the /status render, got ${next.last_prompt_cost_usd}`);
+  assert.equal(next.average_window, 2, 'the window holds two charged turns');
+  assert.ok(Math.abs(next.average_provider_cost_usd - 0.06) < 1e-9, `got ${next.average_provider_cost_usd}`);
+  assert.ok(Math.abs(next.session_cost_usd - 1.2) < 1e-9, 'the session total still comes from the newest render');
+});
+
+// Copilot's counters are session-cumulative, so each call is the movement
+// between two renders and every render is its own row. A render that moved
+// nothing is only a context reading; recorded Copilot 1.0.85 payloads.
+test('a Copilot render that moved no tokens or units is a context reading, not a turn', () => {
+  const config = testConfig(path.join(tempDir(), 'state.json'));
+  const render = (payload) => storeEvents(normalizeCopilot('status', payload, config, 'statusline'), config);
+  render(fixture('copilot-status-cumulative-1.json'));   // baseline: nothing to diff yet
+  render(fixture('copilot-status-cumulative-2.json'));   // one call
+  const still = fixture('copilot-status-cumulative-2.json');
+  still.context_window.current_context_used_percentage = 12;
+  render(still);                                         // no movement, a new context reading
+  const aggregate = aggregateEvents(ledgerLines(config));
+  assert.equal(aggregate.turns, 1, `one call, got ${aggregate.turns}`);
+  assert.equal(aggregate.increment_turns, 1);
+  assert.equal(aggregate.tokens.input_total, 118301);
+  assert.equal(aggregate.render_only_readings, 2);
+  assert.equal(aggregate.context_percent_samples.turns, 3, 'all three context readings are kept');
+  assert.equal(aggregate.context_percent_samples.percent_last, 12);
+  assert.ok(aggregate.turns_data[0].billing.aiu > 0, 'the units the call moved stay on the one turn');
 });
 
 test('a provider cumulative reset clears subagent cost accumulated on the old basis', () => {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tempDir } from './helpers.mjs';
@@ -531,4 +531,42 @@ test('a composed command that exits without reading its stdin is the command dec
   assert.equal(result.status, 0, result.stderr.toString());
   assert.ok(result.stdout.startsWith('NO-READ\n'), result.stdout.slice(0, 80));
   assert.equal(stateFiles(home).length, 1);
+});
+
+// A shell tool, a CI step or `ssh -T` can hand a hand-run command a stdin pipe
+// that is never closed. `status` used to read stdin whenever it was not a
+// terminal, so it waited for an end that never came (Windows live test,
+// 2026-09-28: a step hung for minutes). Only an explicit --ingest-stdin, which
+// every installed status line passes, reads stdin now.
+test('a hand-run status returns even when its stdin is a pipe nobody closes', async () => {
+  const home = tempDir();
+  const child = spawn(process.execPath, [cli, 'status', '--agent', 'claude', '--json'], {
+    env: { ...process.env, TOKENWATCH_HOME: home, CLAUDE_CODE_SESSION_ID: '' },
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  let stdout = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  const outcome = await new Promise((resolve) => {
+    const timer = setTimeout(() => { child.kill('SIGKILL'); resolve('hung'); }, 8000);
+    child.on('exit', (code) => { clearTimeout(timer); resolve(code); });
+  });
+  child.stdin.destroy();
+  assert.equal(outcome, 0, `status did not return while stdin stayed open (${outcome})`);
+  assert.equal(JSON.parse(stdout).session_scope?.basis !== undefined, true, stdout);
+});
+
+test('status still ingests the payload piped to it with --ingest-stdin', () => {
+  const home = tempDir();
+  const payload = JSON.stringify({
+    session_id: 'ingest-1', prompt_id: 'p1', model: { id: 'claude-test-model' },
+    cost: { total_cost_usd: 0.25 },
+    context_window: { used_percentage: 7, current_usage: { input_tokens: 3, cache_read_input_tokens: 90, output_tokens: 2 } }
+  });
+  const piped = spawnSync(process.execPath, [cli, 'status', '--agent', 'claude', '--ingest-stdin', '--json'], {
+    input: payload, encoding: 'utf8', env: { ...process.env, TOKENWATCH_HOME: home }
+  });
+  assert.equal(piped.status, 0, piped.stderr);
+  const snapshot = JSON.parse(piped.stdout);
+  assert.equal(snapshot.session_scope.session_id, 'ingest-1', piped.stdout);
+  assert.equal(snapshot.session_scope.basis, 'stdin', piped.stdout);
 });

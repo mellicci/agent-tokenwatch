@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { spawnPortable, spawnShellLine } from './spawn.mjs';
 import { parseArgv, boolOption, numberOption } from './args.mjs';
 import { analyzeEvents, formatAuditMarkdown } from './analyze.mjs';
-import { rollingStatusFromState } from './aggregate.mjs';
+import { rollingStatusFromState, turnReadings } from './aggregate.mjs';
 import { COMPOSED_ENV, MAX_COMPOSE_OUTPUT_BYTES, PACKAGE_VERSION, PROBE_ENV, PROBE_MARKER } from './constants.mjs';
 import { composeSettings, configPath, getConfigValue, loadConfig, saveConfig, setConfigValue, tokenwatchHome } from './config.mjs';
 import { runDoctor, formatDoctor } from './doctor.mjs';
@@ -15,6 +15,7 @@ import { readStdin, readStdinBytes, parseJsonPayload } from './input.mjs';
 import { composeEntries, composedStatusCommand, install, isTokenwatchRelay, listInstalls, priorCodexNotify, uninstall } from './installer.mjs';
 import { normalizeAgentPayload } from './normalize/index.mjs';
 import { startOtlpServer } from './otlp-server.mjs';
+import { STATUS_LOCK_BUDGET_MS } from './state-lock.mjs';
 import { collectEvents, emptyStatusState, loadSessionState, pendingTurnRows, previewSessionState, pruneEvents, resolveStatusSession, storeEvents, tryFlushPendingTurns } from './store.mjs';
 import { isWriteRefused } from './fs-util.mjs';
 import { recordRelayOutcome } from './relay-record.mjs';
@@ -75,6 +76,11 @@ async function handleHook(args, config) {
     const payload = await payloadFrom({ positionals, options, startIndex: 2 });
     const events = normalizeAgentPayload(agent, eventName, payload, config, 'hook');
     const results = storeEvents(events, config);
+    // An update stored without the session lock is counted for `doctor`; under
+    // debug the hook also says so as it happens.
+    if (process.env.TOKENWATCH_DEBUG === '1' && results.some((row) => row.unlocked)) {
+      console.error('tokenwatch hook: session state lock stayed busy; stored without it (counted in session-state:unlocked-writes)');
+    }
     if (options.json) process.stdout.write(jsonString({ ok: true, stored: results.filter((row) => row.stored).length }));
     return 0;
   } catch (error) {
@@ -210,7 +216,11 @@ async function handleStatus(args, config, env = process.env) {
   let degraded;
   let note;
   let composed;
-  if (boolOption(options.ingestStdin, false) || !process.stdin.isTTY) {
+  // Only an explicit --ingest-stdin reads stdin, and every installed status line
+  // passes it. Reading whenever stdin was not a terminal made a hand-run status
+  // wait forever on a pipe its caller never closed: a shell tool, a CI step,
+  // `ssh -T` (Windows live test, 2026-09-28).
+  if (boolOption(options.ingestStdin, false)) {
     let text;
     if (composeKey) {
       // One raw read serves both halves: the other command gets the bytes the
@@ -244,7 +254,7 @@ async function handleStatus(args, config, env = process.env) {
         const payload = parseJsonPayload(text, 'status-line stdin');
         events = normalizeAgentPayload(agent, 'status', payload, config, 'statusline');
         sessionId = events[0]?.session_id;
-        storeEvents(events, config);
+        storeEvents(events, config, { lock: { budgetMs: STATUS_LOCK_BUDGET_MS } });
       }
     } catch (error) {
       if (isWriteRefused(error) && events) {
@@ -517,16 +527,20 @@ async function handleAnalyze(args, config) {
   const since = options.since ? sinceDate(options.since) : undefined;
   const agents = options.agent ? String(options.agent).split(',').map(normalizedAgentName) : undefined;
   const events = await collectEvents(config, { since, agents, projectId: options.projectId }, { pending: flush.unflushed });
-  const report = analyzeEvents(events, config, { since });
+  // The period is grouped into turns once, and every section below reads the
+  // same readings rather than grouping the whole period again.
+  const readings = turnReadings(events);
+  const report = analyzeEvents(events, config, { since, readings });
   const degraded = degradedFlush(flush);
   if (degraded) report.degraded = degraded;
   // Ranked shares are computed here rather than left for a reader to total up.
   if (options.groupBy) {
     report.ranking = rankGroups(events, {
       by: String(options.groupBy),
-      limit: numberOption(options.limit, 10)
+      limit: numberOption(options.limit, 10),
+      readings
     });
-    report.concentration = turnConcentration(events);
+    report.concentration = turnConcentration(events, { readings });
     report.compactions = compactionSummary(events);
   }
   if (boolOption(options.compare, false)) {
@@ -535,7 +549,7 @@ async function handleAnalyze(args, config) {
     const priorStart = new Date(new Date(since).getTime() - span).toISOString();
     const prior = (await collectEvents(config, { since: priorStart, agents, projectId: options.projectId }, { pending: flush.unflushed }))
       .filter((event) => event.ts < since);
-    report.comparison = { current_since: since, prior_since: priorStart, ...comparePeriods(events, prior) };
+    report.comparison = { current_since: since, prior_since: priorStart, ...comparePeriods(events, prior, { current: readings }) };
   }
   const format = String(options.format || (options.json ? 'json' : 'markdown')).toLowerCase();
   const markdown = () => `${degraded ? `> note: ${degraded.note}\n\n` : ''}${formatAuditMarkdown(report)}`;

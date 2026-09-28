@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { defaultConfig } from '../src/config.mjs';
+import { tempDir } from './helpers.mjs';
 import { sessionStateFile } from '../src/store.mjs';
 import { collectionLiveness, formatDoctor } from '../src/doctor.mjs';
 import { statusLineShadowMessage } from '../src/claude-settings.mjs';
@@ -277,4 +279,19 @@ test('only the import command reaches the modules that open session files, and o
     if (skill === 'tw-import-history') assert.match(fs.readFileSync(file, 'utf8'), /tokenwatch import/);
     else assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /tokenwatch import/, `${skill} must not run the import`);
   }
+});
+
+// The npm package ships without test/ (package.json "files"), and `node --test`
+// with nothing to run reports 0 tests and exits 0 - a green run that tested
+// nothing (Windows x Copilot live test, 2026-09-28). `npm test` refuses instead,
+// and says where the tests are.
+test('npm test refuses to pass where there is no test directory', () => {
+  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const run = (cwd) => spawnSync(npm, ['run', '--silent', 'pretest'], { cwd, encoding: 'utf8', shell: process.platform === 'win32' });
+  const packaged = tempDir('tokenwatch-packaged-');
+  fs.copyFileSync(new URL('../package.json', import.meta.url), path.join(packaged, 'package.json'));
+  const refused = run(packaged);
+  assert.equal(refused.status, 1, `npm test passed with no tests: ${refused.stdout}${refused.stderr}`);
+  assert.match(refused.stderr, /no test\/ directory here.*run them from the repository or the release zip/s, refused.stderr);
+  assert.equal(run(fileURLToPath(new URL('..', import.meta.url))).status, 0, 'the repository still runs its tests');
 });

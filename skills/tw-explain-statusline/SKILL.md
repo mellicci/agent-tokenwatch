@@ -166,8 +166,8 @@ warm`). Practical tips:
   old session against starting fresh from that summary.
 
 There is no setting that extends the TTL; it is the provider's. `cacheTtlSeconds`
-in config is only an assumption used for gap analysis in audits, and is never
-rendered on the status line.
+in config is only an assumption, used for gap analysis in audits of sessions that
+reported no TTL of their own, and is never rendered on the status line.
 
 ## Where prices come from
 
@@ -194,7 +194,11 @@ Not every agent reports money. Copilot CLI reports none at all, so in place of
 Those are Copilot's own billing units — AI units and premium requests, the same
 figures its native footer shows — and they are what the user's quota is consumed
 in. They are provider-reported counts, diffed per reply exactly as a dollar total
-would be, so `previous reply 0.265 AIU` is that reply's real consumption.
+would be, so `previous reply 0.265 AIU` is that reply's real consumption. Copilot
+names no reply, so Tokenwatch counts one from its prompt hook: every model call
+after a prompt belongs to that prompt's reply, and the newest reply reads
+`this reply … so far` until the next prompt. Without the prompt hook (hooks not
+installed), each model call shows as a reply of its own.
 
 Say plainly what they are not: they are not dollars, no exchange rate is applied,
 and nothing here converts one to the other. If asked what a reply cost in money

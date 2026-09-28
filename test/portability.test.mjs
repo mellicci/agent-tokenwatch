@@ -10,7 +10,7 @@ import { claudeCommands, copilotCommands, install, nodeOnPathWarning, recordedCo
 import { CLAUDE_HOOK_EVENTS, CODEX_WRAPPER_ENV, COPILOT_HOOK_EVENTS, PROBE_ENV, PROBE_MARKER } from '../src/constants.mjs';
 import { runDoctor } from '../src/doctor.mjs';
 import { claudeShell, findGitBash, quoteForCmd, shellLineInvocation, spawnPortable, spawnShellLine } from '../src/spawn.mjs';
-import { resolvePath } from '../src/fs-util.mjs';
+import { readJson, resolvePath } from '../src/fs-util.mjs';
 import { tempDir, testConfig, windowsPath } from './helpers.mjs';
 import { listSessionFiles, resolveSessionDir } from '../src/import/sessions.mjs';
 
@@ -584,4 +584,15 @@ test('a session directory resolves like any configured path, and the glob matche
   for (const name of ['rollout-2026-09-10T09-00-00-a.jsonl', 'rollout-b.jsonl.bak', 'notes.jsonl', 'rollout-c.json']) fs.writeFileSync(path.join(nested, name), '{}\n');
   const found = listSessionFiles(root, '**/rollout-*.jsonl').map((file) => path.basename(file));
   assert.deepEqual(found, ['rollout-2026-09-10T09-00-00-a.jsonl']);
+});
+
+// Windows editors and PowerShell 5.1's Out-File save UTF-8 with a byte-order
+// mark. The mark is not JSON, and JSON.parse rejects it, so a config or record
+// file a user touched on Windows used to read as corrupt.
+test('a JSON file saved with a byte-order mark reads as the JSON it holds', () => {
+  const file = path.join(tempDir(), 'bom.json');
+  fs.writeFileSync(file, '﻿{"retentionDays": 30}\r\n');
+  assert.deepEqual(readJson(file), { retentionDays: 30 });
+  fs.writeFileSync(file, '{"a": "﻿ inside a string stays"}');
+  assert.equal(readJson(file).a, '﻿ inside a string stays', 'only a leading mark is dropped');
 });

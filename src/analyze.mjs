@@ -1,4 +1,4 @@
-import { aggregateEvents, groupTurns } from './aggregate.mjs';
+import { aggregateEvents, turnReadings, turnsOf } from './aggregate.mjs';
 import { compactNumber, money } from './format.mjs';
 
 function mean(values) {
@@ -26,7 +26,13 @@ function sessionGroups(turns) {
     list.push(turn);
     map.set(key, list);
   });
-  return [...map.entries()].map(([key, list]) => ({ key, turns: list.sort((a, b) => new Date(a.last_ts) - new Date(b.last_ts)) }));
+  // Parsed once per turn, not once per comparison.
+  return [...map.entries()].map(([key, list]) => ({
+    key,
+    turns: list.map((turn) => ({ turn, time: Date.parse(turn.last_ts) }))
+      .sort((a, b) => a.time - b.time)
+      .map((row) => row.turn)
+  }));
 }
 
 function inputGrowth(sessions) {
@@ -42,22 +48,85 @@ function inputGrowth(sessions) {
   return rows;
 }
 
-function coldResumeEvidence(sessions, ttlSeconds) {
+// The cache TTLs the provider itself reported, per session, in time order.
+// Claude Code reports one on its status line (`cache.ttl_source:
+// provider_reported`); a session with none has only the configured assumption.
+// Each report's time is parsed once: nearly every Claude turn carries one.
+function providerTtls(events) {
+  const map = new Map();
+  for (const event of events) {
+    if (event.cache?.ttl_source !== 'provider_reported' || !(event.cache.ttl_seconds > 0)) continue;
+    const key = `${event.agent}|${event.session_id ?? 'unknown'}`;
+    const list = map.get(key) ?? [];
+    list.push({ time: Date.parse(event.ts), seconds: event.cache.ttl_seconds });
+    map.set(key, list);
+  }
+  for (const list of map.values()) list.sort((a, b) => a.time - b.time);
+  return map;
+}
+
+// The TTL in force when the prior turn ended: the provider's latest report up to
+// then, else its first report in the session (still the provider's own value
+// for this session), else the configured value, which is an assumption.
+// A binary search over the time-ordered reports: scanning them all for every
+// gap made a report on a long Claude session quadratic (37 s for 100,000 rows).
+function ttlAt(reports, ts, configured) {
+  if (!reports?.length) return { seconds: configured, source: 'configured' };
+  const until = Date.parse(ts);
+  let low = 0;
+  let high = reports.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (reports[middle].time <= until) low = middle + 1;
+    else high = middle;
+  }
+  const known = reports[low - 1] ?? reports[0];
+  return { seconds: known.seconds, source: 'provider_reported' };
+}
+
+function coldResumeEvidence(sessions, ttls, configuredTtl) {
   let gaps = 0;
   let costlyGaps = 0;
+  const bySource = { provider_reported: 0, configured: 0 };
+  const providerSeconds = new Set();
   for (const session of sessions) {
     for (let i = 1; i < session.turns.length; i += 1) {
       const prior = session.turns[i - 1];
       const current = session.turns[i];
-      const gap = (new Date(current.first_ts) - new Date(prior.last_ts)) / 1000;
-      if (gap <= ttlSeconds) continue;
+      const ttl = ttlAt(ttls.get(session.key), prior.last_ts, configuredTtl);
+      const gap = (Date.parse(current.first_ts) - Date.parse(prior.last_ts)) / 1000;
+      if (gap <= ttl.seconds) continue;
       gaps += 1;
+      bySource[ttl.source] += 1;
+      if (ttl.source === 'provider_reported') providerSeconds.add(ttl.seconds);
       const currentFresh = current.usage.input_fresh ?? current.usage.input_total ?? 0;
       const priorFresh = prior.usage.input_fresh ?? prior.usage.input_total ?? 0;
       if (currentFresh >= Math.max(5_000, priorFresh * 1.25)) costlyGaps += 1;
     }
   }
-  return { gaps, costlyGaps };
+  return {
+    gaps,
+    costlyGaps,
+    sources: {
+      provider_reported_gaps: bySource.provider_reported,
+      provider_ttl_seconds: [...providerSeconds].sort((a, b) => a - b),
+      configured_gaps: bySource.configured,
+      configured_ttl_seconds: configuredTtl
+    }
+  };
+}
+
+// Says which TTL each flagged gap was judged against. A configured TTL is an
+// assumption and is named as one, never presented as measured.
+function ttlGapsEvidence(cold) {
+  const { provider_reported_gaps: provider, provider_ttl_seconds: seconds, configured_gaps: configured, configured_ttl_seconds: assumed } = cold.sources;
+  const reported = `the provider-reported TTL (${seconds.map((value) => `${value}s`).join(', ')})`;
+  const head = !configured
+    ? `${cold.gaps} within-session gaps exceeded ${reported}`
+    : !provider
+      ? `${cold.gaps} within-session gaps exceeded the configured ${assumed}s cache TTL, an assumption: no TTL was reported for these sessions`
+      : `${cold.gaps} within-session gaps exceeded the cache TTL: ${provider} ${reported}, ${configured} the configured ${assumed}s TTL, an assumption used where no TTL was reported`;
+  return `${head}; ${cold.costlyGaps} were followed by a materially larger fresh-input observation.`;
 }
 
 function confidence(sample, strong = 20) {
@@ -66,9 +135,10 @@ function confidence(sample, strong = 20) {
   return 'low';
 }
 
-export function analyzeEvents(events, config, { since } = {}) {
-  const aggregate = aggregateEvents(events);
-  const turns = groupTurns(events);
+// `readings` is turnReadings(events), when the caller has already grouped them.
+export function analyzeEvents(events, config, { since, readings = turnReadings(events) } = {}) {
+  const aggregate = aggregateEvents(events, { readings });
+  const turns = turnsOf(readings);
   const sessions = sessionGroups(turns);
   const observations = [];
   const recommendations = [];
@@ -78,9 +148,21 @@ export function analyzeEvents(events, config, { since } = {}) {
   const imported = aggregate.imported_turns
     ? ` ${aggregate.imported_turns} turns were imported from session files (tokens only, no provider cost; ${aggregate.imported_turns - aggregate.imported_unverified_turns} verified, ${aggregate.imported_unverified_turns} unverified).`
     : '';
+  // F3: a slash command or a baseline render is not a turn, and the report says
+  // how many were left out rather than letting the count drop silently.
+  const renderOnly = aggregate.render_only_readings
+    ? ` ${aggregate.render_only_readings} status-line renders with no model call behind them (a slash command or a baseline render) are not counted as turns; their context readings are kept.`
+    : '';
+  // A turn is a prompt and its whole answer. Where neither a turn id nor a
+  // prompt hook marked one, each row is counted, and the report says how many.
+  const undelimited = aggregate.undelimited_turns
+    ? ` ${aggregate.undelimited_turns} turns had no turn id and no prompt hook in the period to delimit them, so each is counted per model call (per ledger row), not per prompt.`
+    : '';
   observations.push({
     id: 'coverage',
-    evidence: `${aggregate.turns} turns across ${aggregate.session_count} identified sessions; ${aggregate.increment_turns} carry additive per-call token counts and ${aggregate.context_samples.turns} carry latest-call gauge samples. ${aggregate.cost.provider_turns} have provider-reported cost and ${aggregate.cost.estimated_turns} have configured estimates.${imported}`,
+    // The gauge series count readings, not turns: since render-only readings
+    // stopped being turns, they are in these counts and in no turn count.
+    evidence: `${aggregate.turns} turns across ${aggregate.session_count} identified sessions; ${aggregate.increment_turns} carry additive token counts, ${aggregate.cost.provider_turns} have provider-reported cost and ${aggregate.cost.estimated_turns} have configured estimates. ${aggregate.context_samples.turns} latest-call gauge readings were recorded, including any that are not turns.${imported}${renderOnly}${undelimited}`,
     confidence: aggregate.turns ? 'high' : 'low'
   });
   if (aggregate.context_samples.turns) {
@@ -99,7 +181,7 @@ export function analyzeEvents(events, config, { since } = {}) {
   if (aggregate.context_percent_samples.turns) {
     observations.push({
       id: 'context-percent',
-      evidence: `Context-window percent samples: ${aggregate.context_percent_samples.turns} turns; median ${Math.round(aggregate.context_percent_samples.percent_median)}%, p95 ${Math.round(aggregate.context_percent_samples.percent_p95)}%, max ${Math.round(aggregate.context_percent_samples.percent_max)}%, latest ${Math.round(aggregate.context_percent_samples.percent_last)}%.`,
+      evidence: `Context-window percent: ${aggregate.context_percent_samples.turns} readings; median ${Math.round(aggregate.context_percent_samples.percent_median)}%, p95 ${Math.round(aggregate.context_percent_samples.percent_p95)}%, max ${Math.round(aggregate.context_percent_samples.percent_max)}%, latest ${Math.round(aggregate.context_percent_samples.percent_last)}%.`,
       confidence: confidence(aggregate.context_percent_samples.turns)
     });
   }
@@ -157,12 +239,16 @@ export function analyzeEvents(events, config, { since } = {}) {
     }
   }
 
-  const cold = coldResumeEvidence(sessions, Number(config.cacheTtlSeconds) || 300);
+  // M2: judged against the TTL the provider reported for that session where it
+  // did (Claude Code reports one), and the configured value only where it did
+  // not. The configured 300 s default flagged gaps under a reported 1 h TTL.
+  const cold = coldResumeEvidence(sessions, providerTtls(events), Number(config.cacheTtlSeconds) || 300);
   if (cold.gaps) {
     observations.push({
       id: 'ttl-gaps',
-      evidence: `${cold.gaps} within-session gaps exceeded the configured ${config.cacheTtlSeconds}s cache TTL; ${cold.costlyGaps} were followed by a materially larger fresh-input observation.`,
-      confidence: confidence(cold.gaps, 10)
+      evidence: ttlGapsEvidence(cold),
+      confidence: confidence(cold.gaps, 10),
+      ttl_sources: cold.sources
     });
     if (cold.costlyGaps >= 2) {
       recommendations.push({
@@ -247,7 +333,8 @@ export function analyzeEvents(events, config, { since } = {}) {
       provider_costs_and_estimates_separated: true,
       savings_claims: 'none_without_counterfactual_measurement',
       content_inspected: false,
-      configured_cache_ttl_seconds: Number(config.cacheTtlSeconds)
+      configured_cache_ttl_seconds: Number(config.cacheTtlSeconds),
+      cache_ttl_basis: 'provider_reported_per_session_else_configured'
     }
   };
 }
@@ -259,10 +346,10 @@ export function formatAuditMarkdown(report) {
     `Generated: ${report.generated_at}`,
     `Period: ${report.period.since ?? 'first event'} → ${report.period.until ?? 'latest event'}`, '',
     '## Measured totals', '',
-    `- ${a.turns} turns across ${a.session_count} identified sessions.`,
+    `- ${a.turns} turns across ${a.session_count} identified sessions.${a.render_only_readings ? ` ${a.render_only_readings} status-line renders with no model call behind them are not counted as turns; their context readings are kept.` : ''}${a.undelimited_turns ? ` ${a.undelimited_turns} turns had no turn id or prompt hook to delimit them and are counted per model call.` : ''}`,
     `- Additive per-call tokens (${a.increment_turns} turns): ${compactNumber(a.tokens.input_total)} input total; ${compactNumber(a.tokens.input_fresh)} fresh; ${compactNumber(a.tokens.cache_read)} cache reads; ${compactNumber(a.tokens.cache_write)} cache writes; ${compactNumber(a.tokens.output)} output.`,
-    `- Latest-call gauge samples (${a.context_samples.turns} turns): median ${compactNumber(a.context_samples.input_median)} input, p95 ${compactNumber(a.context_samples.input_p95)}, max ${compactNumber(a.context_samples.input_max)}. Not summed; each sample re-describes one call.`,
-    `- Context-window percent (${a.context_percent_samples.turns} turns): median ${a.context_percent_samples.percent_median !== undefined ? Math.round(a.context_percent_samples.percent_median) : 'n/a'}%, p95 ${a.context_percent_samples.percent_p95 !== undefined ? Math.round(a.context_percent_samples.percent_p95) : 'n/a'}%, max ${a.context_percent_samples.percent_max !== undefined ? Math.round(a.context_percent_samples.percent_max) : 'n/a'}%.`,
+    `- Latest-call gauge samples (${a.context_samples.turns} readings): median ${compactNumber(a.context_samples.input_median)} input, p95 ${compactNumber(a.context_samples.input_p95)}, max ${compactNumber(a.context_samples.input_max)}. Not summed; each sample re-describes one call.`,
+    `- Context-window percent (${a.context_percent_samples.turns} readings): median ${a.context_percent_samples.percent_median !== undefined ? Math.round(a.context_percent_samples.percent_median) : 'n/a'}%, p95 ${a.context_percent_samples.percent_p95 !== undefined ? Math.round(a.context_percent_samples.percent_p95) : 'n/a'}%, max ${a.context_percent_samples.percent_max !== undefined ? Math.round(a.context_percent_samples.percent_max) : 'n/a'}%.`,
     `- Provider-reported cost: ${money(a.cost.provider_reported_usd)} across ${a.cost.provider_turns} observations.`,
     `- Configured estimate: ${money(a.cost.configured_estimate_usd, true)} across ${a.cost.estimated_turns} observations.`, '',
     'Provider-reported charges and local estimates are intentionally not added together.', '',

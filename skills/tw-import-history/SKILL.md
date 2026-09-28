@@ -81,7 +81,11 @@ What `diagnosis` means:
   when none is configured), so nothing can be read, checked or imported. Tell
   the user where Tokenwatch looked, and do not propose a mapping. A non-empty
   `errors` beside it means the mapping is invalid as well.
-- `verified` - the import agrees with live capture. Offer the import.
+- `verified` - the import agrees with live capture. Offer the import. If
+  `overlap.boundary_mismatches` is above zero, say that many turns at a
+  session's first or last edge differed, which the check tolerates because
+  live capture starts and stops part-way through a session; only a mismatch
+  in between would have stopped it.
 - `no_overlap` or `no_live_tokens` - there is nothing live to check against
   (a fresh install, plain `codex`). The numbers cannot be verified. Say so. If
   `internally_consistent` is `true`, you may add that the file agrees with its

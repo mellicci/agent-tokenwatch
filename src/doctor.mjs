@@ -218,8 +218,10 @@ function retentionCheck(config, now) {
   if (!Number.isFinite(days) || days <= 0) return [];
   // An import appends old history after newer rows, so the first line is no
   // longer the oldest once one has run: the runs record their earliest row
-  // (intent 06, D4).
-  const earliestImported = loadImportRuns(config).runs.map((run) => Date.parse(run.earliest_ts ?? run.earliest_planned_ts)).filter(Number.isFinite);
+  // (intent 06, D4). An undone run took its rows out again, so it no longer
+  // ages the ledger.
+  const earliestImported = loadImportRuns(config).runs.filter((run) => !run.undone_at)
+    .map((run) => Date.parse(run.earliest_ts ?? run.earliest_planned_ts)).filter(Number.isFinite);
   const firstLine = oldestLedgerEntry(config.dataFile)?.getTime();
   const candidates = [firstLine, ...earliestImported].filter(Number.isFinite);
   const oldest = candidates.length ? new Date(Math.min(...candidates)) : undefined;
@@ -245,15 +247,34 @@ function retentionCheck(config, now) {
 // thrown out of `runDoctor`: one truncated file used to end doctor with
 // `Cannot read JSON` and no report at all. The store fails on the same file, so
 // it is worth naming, and nothing here moves or rewrites it.
+//
+// A state update stored without its session's lock, because another process
+// held the lock past the hook's budget, is counted in the same file
+// (`counters.unlocked_writes`, `storeEvent`) until the next `tokenwatch repair`,
+// which rebuilds the subagent counts from the ledger and resets the count
+// (`repairLedger`). It is named here, only when it happened: the ledger kept
+// every row, but a live figure (a subagent count, a running baseline) may have
+// missed one update if another write overlapped it.
 function unkeyedCumulativeCheck(config) {
   let unkeyed = 0;
+  let unlocked = 0;
+  let unlockedFiles = 0;
   const unreadable = [];
   for (const file of listSessionStateFiles(config)) {
     const read = readStateFile(file);
     if (read.problem) { unreadable.push(`${file} (${read.problem})`); continue; }
     unkeyed += Number(read.state?.counters?.unkeyed ?? 0);
+    const writes = Number(read.state?.counters?.unlocked_writes ?? 0);
+    if (writes > 0) { unlocked += writes; unlockedFiles += 1; }
   }
   const checks = [];
+  if (unlocked) {
+    checks.push({
+      id: 'session-state:unlocked-writes',
+      status: 'info',
+      detail: `${unlocked} state update(s) in ${unlockedFiles} session state file(s) were stored without the session lock since the last repair, because another Tokenwatch process held it for longer than a hook may wait. The ledger kept every row; a live figure on the status line may have missed one of those updates. Run: tokenwatch repair (it rebuilds subagent counts from the ledger and resets this count)`
+    });
+  }
   if (unreadable.length) {
     checks.push({
       id: 'session-state:unreadable',
@@ -1024,9 +1045,22 @@ export function claudeCommandChecks(installs, env, platform = process.platform) 
   for (const [key, record] of Object.entries(installs)) {
     const claude = record.claude;
     if (!claude?.settingsPath) continue;
-    // An unreadable settings file is reported by its own check.
+    // A settings file refused at install wrote nothing and is reported by its
+    // own `<key>:claude-settings` line.
+    if (claude.refused) continue;
+    // Read with the grammar the installer edits with, which accepts the
+    // byte-order mark a Windows editor saves: plain JSON.parse threw on it, and
+    // the probes for that install were skipped without a word. A file that still
+    // cannot be read is said so here, named but never quoted.
     let settings = null;
-    try { settings = readJson(claude.settingsPath, null); } catch {}
+    try {
+      settings = readJsonc(claude.settingsPath, null);
+    } catch (error) {
+      const reason = String(error?.message ?? '').split(': ').pop() || 'unreadable';
+      checks.push({ id: `${key}:claude-hooks-run`, status: 'warn',
+        detail: `${claude.settingsPath} could not be read here (${reason}), so its Claude Code commands were not run. Repair the file, then run tokenwatch doctor again.` });
+      continue;
+    }
     if (!settings || typeof settings !== 'object') continue;
     const present = (hook) => (settings.hooks?.[hook.eventName] ?? []).some((entry) =>
       (entry?.hooks ?? []).some((candidate) => candidate?.type === 'command' && candidate.command === hook.command));

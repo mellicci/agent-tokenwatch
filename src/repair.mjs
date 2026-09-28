@@ -1,6 +1,9 @@
 import fs from 'node:fs';
 import { collectEvents, listSessionStateFiles, subagentWindowKey } from './store.mjs';
 import { atomicWriteJson, readJson, writeTextAtomic } from './fs-util.mjs';
+import { withStateLock } from './state-lock.mjs';
+
+const REPAIR_LOCK_BUDGET_MS = 2000;
 
 // Before pending turns were keyed by turn, interleaved prompt identifiers made a
 // single exchange flush repeatedly, leaving many partial records where one
@@ -75,7 +78,19 @@ function rebuildSubagentCounts(events, state) {
   return corrected;
 }
 
-export async function repairLedger(config, { dryRun = false } = {}) {
+// State updates stored without the session lock (`counters.unlocked_writes`,
+// counted by `storeEvent` and reported by `doctor`) are counted since the last
+// repair: the repair rebuilds from the ledger what such a write can have lost
+// that the ledger can restore - the subagent counts - so once a file is
+// rewritten here its count starts again from zero, and `doctor` stops pointing
+// at a repair that has already been run. A file whose lock stays busy keeps its
+// count.
+function unlockedWrites(state) {
+  return Number(state?.counters?.unlocked_writes ?? 0) > 0 ? Number(state.counters.unlocked_writes) : 0;
+}
+
+// `lock` (`{ budgetMs, staleMs }`) exists for tests, as for `storeEvent`.
+export async function repairLedger(config, { dryRun = false, lock: lockOptions } = {}) {
   const events = await collectEvents(config, {});
   const before = events.length;
   const { events: repaired, merged, turns } = mergeFragments(events);
@@ -92,11 +107,16 @@ export async function repairLedger(config, { dryRun = false } = {}) {
   const states = listSessionStateFiles(config).map((file) => ({ file, state: readJson(file, null) }))
     .filter((entry) => entry.state);
   let corrected = 0;
+  let unlocked = 0;
   for (const entry of states) {
     entry.state.subagentWindows ??= {};
-    corrected += rebuildSubagentCounts(repaired, entry.state);
+    entry.corrected = rebuildSubagentCounts(repaired, entry.state);
+    entry.unlocked = unlockedWrites(entry.state);
+    corrected += entry.corrected;
+    unlocked += entry.unlocked;
   }
   result.subagent_counts_corrected = corrected;
+  result.unlocked_writes_cleared = unlocked;
   if (dryRun) return result;
 
   if (merged) {
@@ -105,6 +125,30 @@ export async function repairLedger(config, { dryRun = false } = {}) {
     writeTextAtomic(config.dataFile, repaired.map((event) => JSON.stringify(event)).join('\n') + '\n', 0o600);
     result.backup = backup;
   }
-  if (corrected) for (const entry of states) atomicWriteJson(entry.file, entry.state);
+  // Each file is corrected under its session's lock, from a copy read once the
+  // lock is held, so a hook writing that session meanwhile is neither erased
+  // nor erases the correction. A repair is typed, not run by an agent, so it
+  // waits longer than a hook would; a file still busy after that is left for
+  // the next repair rather than overwritten, and counted.
+  let busy = 0;
+  let cleared = 0;
+  for (const entry of states) {
+    if (!entry.corrected && !entry.unlocked) continue;
+    withStateLock(entry.file, (lock) => {
+      if (lock.reason === 'timeout') { busy += 1; return; }
+      const fresh = readJson(entry.file, null);
+      if (!fresh) return;
+      fresh.subagentWindows ??= {};
+      rebuildSubagentCounts(repaired, fresh);
+      const count = unlockedWrites(fresh);
+      if (count) {
+        cleared += count;
+        delete fresh.counters.unlocked_writes;
+      }
+      atomicWriteJson(entry.file, fresh);
+    }, { budgetMs: REPAIR_LOCK_BUDGET_MS, ...lockOptions });
+  }
+  result.unlocked_writes_cleared = cleared;
+  if (busy) result.state_files_busy = busy;
   return result;
 }
