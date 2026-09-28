@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-09-28
 
 ### History import
 
@@ -674,7 +674,7 @@ has a regression test that fails without its fix.
   `docs/support-matrix.json` by `scripts/support-matrix.mjs`; a docs test fails
   when the README disagrees with the data file, or when a cell claims a level
   without the version or date it needs. Updating it is now a release-checklist
-  item in `docs/publishing.md`.
+  item in the release checklist.
 - **Changed: the "no status line" troubleshooting entry leads with the likely
   cause.** `INSTALL.md` now starts from a project-level status line outranking
   the user-level one, which is what the first Windows install hit, shows the

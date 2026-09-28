@@ -36,6 +36,9 @@ jobs:
 
   publish:
     needs: test
+    # npm refuses provenance from a private repository, so a tag pushed while
+    # the repository is still private runs the tests and publishes nothing.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -60,5 +63,19 @@ jobs:
       # before the first tag, choosing this repository and this workflow file.
       # Until that is done the publish step will fail to authenticate, which is
       # the right failure: it does not silently fall back to a stored secret.
+      # A version already on npm - the first release was published by hand,
+      # before trusted publishing could be configured for the package - is
+      # left alone instead of failing the run.
+      - name: Skip a version npm already has
+        id: published
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "$name@$version is already on npm; nothing to publish."
+          fi
       - run: npm install -g npm@latest
+        if: steps.published.outputs.already != 'true'
       - run: npm publish --provenance --access public
+        if: steps.published.outputs.already != 'true'

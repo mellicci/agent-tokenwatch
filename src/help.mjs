@@ -1,4 +1,4 @@
-export const HELP = `agent-tokenwatch 0.1.0
+export const HELP = `agent-tokenwatch 0.2.0
 
 Local, metadata-only token and cost telemetry for Claude Code, Codex CLI, and
 GitHub Copilot CLI. No runtime dependencies; Node.js 20+.

@@ -25,7 +25,8 @@ function run(args, env = {}) {
 test('version and help work without dependencies', () => {
   const version = run(['version']);
   assert.equal(version.status, 0, version.stderr);
-  assert.equal(version.stdout.trim(), '0.1.0');
+  const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(version.stdout.trim(), pkg.version, 'the CLI reports the version package.json declares');
   const help = run(['help']);
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /metadata-only token and cost telemetry/i);

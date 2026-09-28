@@ -21,7 +21,7 @@ tokenwatch doctor
 ```
 
 `npm pack` builds the same tarball npm would publish and prints its name
-(`agent-tokenwatch-0.1.0.tgz` for this release); install exactly that file.
+(`agent-tokenwatch-0.2.0.tgz` for this release); install exactly that file.
 That puts a real copy in npm's global folder — what `npm install -g
 agent-tokenwatch` gives you — so the source folder can be moved or deleted
 afterwards without breaking anything. Each line is one command, nothing
@@ -188,8 +188,8 @@ cd agent-tokenwatch-*/agent-tokenwatch
 **Windows (PowerShell)**
 
 ```powershell
-Expand-Archive agent-tokenwatch-portable-0.1.0.zip -DestinationPath .
-Set-Location agent-tokenwatch-0.1.0\agent-tokenwatch
+Expand-Archive agent-tokenwatch-portable-0.2.0.zip -DestinationPath .
+Set-Location agent-tokenwatch-0.2.0\agent-tokenwatch
 ```
 
 ### Restore the git history (optional)

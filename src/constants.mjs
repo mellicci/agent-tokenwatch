@@ -1,4 +1,4 @@
-export const PACKAGE_VERSION = '0.1.0';
+export const PACKAGE_VERSION = '0.2.0';
 export const SCHEMA = 'tokenwatch.event/v1';
 export const CONFIG_VERSION = 1;
 export const INSTALL_VERSION = 1;

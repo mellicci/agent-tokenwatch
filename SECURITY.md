@@ -2,7 +2,7 @@
 
 ## Supported version
 
-The current `0.1.x` line receives security fixes.
+The current `0.2.x` line receives security fixes.
 
 ## Reporting
 

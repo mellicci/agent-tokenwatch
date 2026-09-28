@@ -1,4 +1,4 @@
-# Agent Tokenwatch v0.1.0 Architecture - Privacy-Allowlisted Multi-Agent Telemetry Pipeline
+# Agent Tokenwatch v0.2.0 Architecture - Privacy-Allowlisted Multi-Agent Telemetry Pipeline
 
 ## Overview
 

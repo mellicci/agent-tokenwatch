@@ -26,7 +26,7 @@
           "level": "hands-on",
           "version": "2.1.280 and 2.1.281",
           "date": "2026-09-24",
-          "evidence": "The maintainer's machine, a Linux container, has recorded Claude Code status-line samples and hook events continuously since 2026-09-09; the newest, on 2026-09-24, came from sessions running Claude Code 2.1.280 and 2.1.281. Subagent counts were reconciled against Claude Code's own transcripts (`docs/publishing.md`). That machine ran the build from before the Unreleased changes dated 2026-09-24 (sandbox-safe reports, doctor's collection and status-line checks, install-location warnings)."
+          "evidence": "The maintainer's machine, a Linux container, has recorded Claude Code status-line samples and hook events continuously since 2026-09-09; the newest, on 2026-09-24, came from sessions running Claude Code 2.1.280 and 2.1.281. Subagent counts were reconciled against Claude Code's own transcripts. That machine ran a build from before the 0.2.0 changes dated 2026-09-24 (sandbox-safe reports, doctor's collection and status-line checks, install-location warnings)."
         },
         "macOS": {
           "level": "ci-only",
@@ -53,7 +53,7 @@
           "level": "provisional",
           "version": "not recorded",
           "date": "2026-09-17",
-          "evidence": "Smoke-tested, not field-tested. On 2026-09-17 a session started through `tokenwatch-codex` recorded token counts over OpenTelemetry and `notify` recorded turn boundaries; on 2026-09-18 host detection was checked by running `codex exec`; the Codex version was not recorded for either. On 2026-09-24, after a user-scope and after a project-scope install, the skill list codex-cli 0.154.0 gives its model (`codex debug prompt-input`) held all six skills. The recorded events have not been reconciled against Codex's own session logs, which `docs/publishing.md` requires before an adapter counts as field-tested. A session started as plain `codex` records no tokens (`docs/limitations.md`)."
+          "evidence": "Smoke-tested, not field-tested. On 2026-09-17 a session started through `tokenwatch-codex` recorded token counts over OpenTelemetry and `notify` recorded turn boundaries; on 2026-09-18 host detection was checked by running `codex exec`; the Codex version was not recorded for either. On 2026-09-24, after a user-scope and after a project-scope install, the skill list codex-cli 0.154.0 gives its model (`codex debug prompt-input`) held all six skills. The recorded events have not been reconciled against Codex's own session logs, which the release checklist requires before an adapter counts as field-tested. A session started as plain `codex` records no tokens (`docs/limitations.md`)."
         },
         "macOS": {
           "level": "provisional",
@@ -79,7 +79,7 @@
           "level": "hands-on",
           "version": "1.0.85",
           "date": "2026-09-17",
-          "evidence": "On 2026-09-17 a live GitHub Copilot CLI 1.0.85 session delivered status-line renders and hook events, and the per-call token delta derived from its cumulative counters matched the `last_call_*` figures Copilot reports separately; the captured payloads are the 1.0.85 fixtures in `test/fixtures`. The recorded data was checked again on 2026-09-21. Hook entries have since become a `bash` and `powershell` pair and `preToolUse` is no longer registered (Unreleased, 2026-09-24); no real Copilot has run that form yet."
+          "evidence": "On 2026-09-17 a live GitHub Copilot CLI 1.0.85 session delivered status-line renders and hook events, and the per-call token delta derived from its cumulative counters matched the `last_call_*` figures Copilot reports separately; the captured payloads are the 1.0.85 fixtures in `test/fixtures`. The recorded data was checked again on 2026-09-21. Hook entries have since become a `bash` and `powershell` pair and `preToolUse` is no longer registered (0.2.0, 2026-09-24); no real Copilot has run that form yet."
         },
         "macOS": {
           "level": "ci-only",

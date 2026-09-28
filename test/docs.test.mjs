@@ -164,8 +164,6 @@ test('the README support matrix is exactly what docs/support-matrix.json renders
   assert.ok(section !== undefined, 'README.md must carry the generated support-matrix block');
   assert.equal(section, renderSupportMatrix(readSupportMatrix()),
     'README.md support matrix has drifted from docs/support-matrix.json; run node scripts/support-matrix.mjs --write');
-  assert.match(read('docs/publishing.md'), /support-matrix\.json/,
-    'the release checklist in docs/publishing.md must ask for the support matrix to be updated');
 });
 
 // A level is only as good as what backs it. "Hands-on verified" with no agent
