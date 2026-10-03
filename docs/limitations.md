@@ -1,7 +1,11 @@
 # Known limitations
 
-- Not live-tested for this release: Codex CLI on any operating system, and
-  any agent on macOS, where only Tokenwatch's own test suite runs (in CI).
+- Codex CLI 0.160.0 was integration-tested on Linux on 2026-10-03 against a
+  local Responses API fixture, using JSON and protobuf OTLP logs. Exact token
+  counts, turn notifications, notifier forwarding, prompt privacy and uninstall
+  restoration passed (`npm run smoke:codex`). This is not a production provider
+  or interactive TUI test. Codex remains unverified on other operating systems,
+  as does any agent on macOS, where only Tokenwatch's own test suite runs (in CI).
   Claude Code and GitHub Copilot CLI were run hands-on on Linux and Windows;
   `docs/support-matrix.json` records what each run covered and what it did not.
 - Agent interfaces do not expose identical metrics. A lifecycle stop event is
@@ -61,7 +65,11 @@
   undo, such as a live turn arriving during it.
 - Codex exact token collection requires OTLP export and the Tokenwatch receiver.
   This implementation accepts OTLP/HTTP JSON and protobuf logs; protobuf
-  metrics are not implemented.
+  metrics are not implemented. The wrapper supplies its exporter through CLI
+  configuration overrides and uses an independent port when the configured one
+  is occupied. Without the notify relay, tokens are collected but notify turn
+  boundaries are absent. Existing user-level notifiers require explicit
+  `install --compose`; project-scope composition does not adopt them.
 - Codex’s native footer is not command-backed, so Tokenwatch does not replace it.
 - A provider may omit cost, cache lifetime, reasoning tokens, or turn IDs. The
   corresponding status field stays absent or `n/a`.

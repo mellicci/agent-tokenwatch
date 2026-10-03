@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Codex wrapper configures OTLP using per-invocation `-c` overrides, uses the
+  receiver's actual port (including port 0), and starts an independent receiver
+  when the configured port is occupied. Existing persistent exporters remain
+  unchanged, and synchronous spawn failures release the receiver.
+- Explicit user-scope `install --compose` records Codex turns while forwarding
+  notifications to the existing notifier. Uninstall restores its original TOML;
+  project-supplied notifier commands are never adopted by composition.
+- Added `npm run smoke:codex` (and `-- --binary`) using real Codex CLI with a
+  local Responses API fixture, isolated configuration, exact token assertions,
+  notifier forwarding, privacy checks and uninstall verification.
+
 ## 0.2.0 — 2026-09-28
 
 ### History import

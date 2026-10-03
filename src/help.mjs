@@ -48,7 +48,7 @@ Install options:
   --scope <user|project>      Installation scope (default user)
   --project <path>            Project root for project scope
   --force                     Replace conflicting status/notify entries, restorable on uninstall
-  --compose                   Compose with an existing status line (the default; restorable on uninstall)
+  --compose                   Compose status lines; also forward an existing user-scope Codex notifier
   --no-compose                Leave an existing status line alone instead of composing with it
   --repair                    Re-compose after another tool changed the status line; keeps what was composed
   --claude-settings <path>    Override Claude settings path

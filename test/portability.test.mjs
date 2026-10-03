@@ -41,8 +41,8 @@ function paths(root) {
 }
 
 // Binding the port ourselves is the proof that the receiver let it go. Running
-// the wrapper again proves nothing: it reads EADDRINUSE as "a receiver is
-// already running" and carries on regardless.
+// the wrapper again proves nothing: it can bind a different port when the
+// requested one is occupied.
 function bindOnce(port) {
   return new Promise((resolve, reject) => {
     const probe = net.createServer();
@@ -100,7 +100,8 @@ test('a Codex child that starts and fails is reported by its exit code, and the 
   const config = testConfig(tempDir());
   const port = await freePort();
   config.codex = { ...config.codex, command: process.execPath, otlpPort: port };
-  const result = await settle(runCodexWrapper(['-e', 'process.exit(3)'], { config }));
+  const result = await settle(runCodexWrapper(['-e', 'process.exit(3)'], { config,
+    spawn: (command, args, opts) => spawnPortable(command, args.slice(4), opts) }));
   assert.deepEqual(result, { code: 3 }, `the child's own exit code must come back, got ${JSON.stringify(result)}`);
   await bindOnce(port);
 });
@@ -114,7 +115,8 @@ test('the Codex wrapper marks the Codex it launches, under a name Codex passes o
   const port = await freePort();
   config.codex = { ...config.codex, command: process.execPath, otlpPort: port };
   const probe = `process.exit(process.env.${CODEX_WRAPPER_ENV} === '1' ? 5 : 6)`;
-  const result = await settle(runCodexWrapper(['-e', probe], { config }));
+  const result = await settle(runCodexWrapper(['-e', probe], { config,
+    spawn: (command, args, opts) => spawnPortable(command, args.slice(4), opts) }));
   assert.deepEqual(result, { code: 5 }, `the child must see ${CODEX_WRAPPER_ENV}=1, got ${JSON.stringify(result)}`);
   assert.doesNotMatch(CODEX_WRAPPER_ENV, /KEY|SECRET|TOKEN/i, 'Codex strips such names from the commands it runs');
 });

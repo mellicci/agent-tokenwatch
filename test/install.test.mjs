@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { assessInstallLocation, bundledSkills, claudeCommands, composedStatusCommand, install, runsThisCli, skillUsage, uninstall } from '../src/installer.mjs';
+import { assessInstallLocation, bundledSkills, claudeCommands, composedStatusCommand, install, priorCodexNotify, runsThisCli, skillUsage, uninstall } from '../src/installer.mjs';
 import { AGENTS, FAIL_CLOSED_HOOK_EVENTS } from '../src/constants.mjs';
 import { identityPath, readJsonc } from '../src/fs-util.mjs';
 import { claudeShell, shellLineInvocation } from '../src/spawn.mjs';
@@ -33,6 +33,45 @@ function paths(root) {
 function options(root, extra = {}) {
   return { agents: 'all', scope: 'project', project: root, homeDir: path.join(root, 'home'), ...paths(root), ...extra };
 }
+
+test('explicit user-scope compose adopts a Codex notifier and uninstall restores its exact TOML', () => {
+  const root = tempDir();
+  const config = testConfig(path.join(root, 'state'));
+  const p = paths(root);
+  const original = 'model = "test-model"\nnotify = [\n  "my-notifier", # keep this comment\n  "--flag",\n]\n';
+  fs.writeFileSync(p.codexConfig, original);
+  const record = install(config, options(root, { scope: 'user', agents: 'codex', compose: true }));
+  assert.ok(record.codex.notifyLine);
+  assert.deepEqual(priorCodexNotify(config, 'user'), ['my-notifier', '--flag']);
+  uninstall(config, { scope: 'user' });
+  assert.equal(fs.readFileSync(p.codexConfig, 'utf8'), original);
+});
+
+test('Codex compose never adopts a notifier supplied by a project checkout', () => {
+  const root = tempDir();
+  const config = testConfig(path.join(root, 'state'));
+  const p = paths(root);
+  const notify = 'notify = ["repo-command"]';
+  fs.writeFileSync(p.codexConfig, `${notify}\n`);
+  const record = install(config, options(root, { agents: 'codex', compose: true }));
+  assert.equal(record.codex.notifyLine, undefined);
+  assert.match(fs.readFileSync(p.codexConfig, 'utf8'), /notify = \["repo-command"\]/);
+  assert.equal(priorCodexNotify(config, projectKey(root)), null);
+});
+
+test('Codex compose installs over an empty notifier and leaves an invalid argv unchanged', () => {
+  for (const notify of ['notify = []', 'notify = [123]']) {
+    const root = tempDir();
+    const config = testConfig(path.join(root, 'state'));
+    const p = paths(root);
+    fs.writeFileSync(p.codexConfig, `${notify}\n`);
+    const record = install(config, options(root, { scope: 'user', agents: 'codex', compose: true }));
+    assert.equal(Boolean(record.codex.notifyLine), notify === 'notify = []');
+    assert.equal(priorCodexNotify(config, 'user'), null);
+    uninstall(config, { scope: 'user' });
+    assert.equal(fs.readFileSync(p.codexConfig, 'utf8'), `${notify}\n`);
+  }
+});
 
 test('install/uninstall preserves unrelated settings and removes managed entries', () => {
   const root = tempDir();

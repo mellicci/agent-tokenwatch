@@ -1315,9 +1315,8 @@ test('a running Tokenwatch receiver is reported as running', async () => {
   }
 });
 
-// Something else on the receiver's port is worse than nothing: Codex sends its
-// telemetry there, and tokenwatch-codex takes a port in use for its own
-// receiver, so the tokens are lost while everything looks started.
+// Direct exports to an occupied port still miss Tokenwatch, but the wrapper
+// now starts an independent receiver instead of trusting an unknown listener.
 test('a port held by something other than the receiver is a warning, not a running receiver', async () => {
   const root = tempDir();
   const config = testConfig(path.join(root, 'state'));
@@ -1329,6 +1328,7 @@ test('a port held by something other than the receiver is a warning, not a runni
     const line = check(codexDoctor(root, config, other.port), 'otlp-receiver');
     assert.equal(line?.status, 'warn', `got ${JSON.stringify(line)}`);
     assert.match(line.detail, /something else answers there \(HTTP 404\), and it is not Tokenwatch's receiver/);
+    assert.match(line.detail, /independent OS-assigned port/);
   } finally {
     await other.stop();
   }

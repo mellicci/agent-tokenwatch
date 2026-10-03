@@ -1253,7 +1253,7 @@ function otlpReceiverCheck(config) {
   if (probe.result === 'other' || probe.result === 'no-answer') {
     const seen = probe.result === 'other' ? `something else answers there (HTTP ${probe.status})` : `something accepts connections there but did not answer within ${RECEIVER_PROBE_TIMEOUT_MS / 1000}s`;
     return { id: 'otlp-receiver', status: 'warn',
-      detail: `${seen}, and it is not Tokenwatch's receiver. Codex would send its telemetry to it, and tokenwatch-codex takes a port in use for its own receiver, so Codex tokens are lost. Free ${where}, or move Tokenwatch with: tokenwatch config set codex.otlpPort <port>, then reinstall for Codex.` };
+      detail: `${seen}, and it is not Tokenwatch's receiver. Direct Codex exports to ${where} will not reach Tokenwatch. Start Codex with tokenwatch-codex: the wrapper uses an independent OS-assigned port when the configured port is occupied.` };
   }
   return notChecked(`the probe could not connect (${probe.code ?? 'unknown error'})`);
 }

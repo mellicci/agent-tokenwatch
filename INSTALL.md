@@ -398,16 +398,41 @@ single-turn charge.
 
 Codex reports exact token usage over OpenTelemetry rather than through its
 lifecycle hook, so run it through the wrapper, which starts a loopback receiver on
-`127.0.0.1:4318` for the duration of the session and closes it on exit:
+`127.0.0.1:4318` for the duration of the session and closes it on exit. When that
+port is occupied, it starts its own receiver on an OS-assigned port:
 
 ```sh
 tokenwatch-codex             # or: tokenwatch codex -- --full-auto
 ```
 
-The installer adds a managed `[otel]` block only when none exists; an existing
-OpenTelemetry configuration is never replaced. Codex's footer is built in rather
+The wrapper passes `otel.exporter` and `otel.log_user_prompt=false` as Codex
+`-c` overrides for that invocation, so token capture also works without an
+installation and with an existing exporter. Explicit `-c` overrides in your
+own arguments take precedence. The installer adds a managed `[otel]` block only
+when none exists; the wrapper leaves the persistent configuration unchanged.
+Codex's footer is built in rather
 than command-backed, so Tokenwatch does not replace it — use
 `tokenwatch status --agent codex` when you want the line.
+
+For turn boundaries and skills, install at user scope. If another tool already
+owns `notify`, explicitly compose it:
+
+```sh
+tokenwatch install --agents codex --scope user --compose
+# For an existing Tokenwatch installation, add --force to reinstall.
+```
+
+The relay records the turn, then forwards the original notification payload to
+your notifier; uninstall restores the original TOML. Project-scope composition
+does not adopt notifier commands supplied by a checkout. Current Codex ignores
+project-local `notify` and `otel` settings; use user scope for persistent capture.
+
+From a source checkout, `npm run smoke:codex` runs the real installed Codex CLI
+against a local Responses API fixture, with isolated settings and no API key or
+paid inference. It checks exact input, cached input, output and reasoning token
+counts, notifier forwarding, prompt privacy, and uninstall restoration. Use
+`npm run smoke:codex -- --binary` to exercise protobuf logs as well. This check
+is optional and requires Codex CLI; the normal test suite needs only Node.
 
 Codex runs the agent's shell commands in a sandbox that, in `workspace-write`
 mode, cannot write outside the workspace. The reporting commands the skills run

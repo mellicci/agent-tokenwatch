@@ -25,6 +25,7 @@
     "test": "node --test",
     "test:coverage": "node --test --experimental-test-coverage",
     "smoke": "node ./scripts/smoke.mjs",
+    "smoke:codex": "node ./scripts/smoke-codex.mjs",
     "check": "node --check ./bin/tokenwatch.mjs && node --check ./src/cli.mjs && node --check ./examples/statusline-wrapper.mjs && npm test && npm run smoke",
     "pack:check": "npm pack --dry-run",
     "pack:portable": "node ./scripts/package-portable.mjs",

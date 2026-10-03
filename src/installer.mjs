@@ -1089,7 +1089,7 @@ function removeManagedOtel(text) {
   return `${head}${text.slice(match.index + match[0].length)}`;
 }
 
-function installCodex(paths, config, force, installIdentifier, userScope = false) {
+function installCodex(paths, config, force, installIdentifier, userScope = false, compose = false) {
   const file = paths.codexConfig;
   const original = fileExists(file) ? fs.readFileSync(file, 'utf8') : '';
   let text = original;
@@ -1110,7 +1110,7 @@ function installCodex(paths, config, force, installIdentifier, userScope = false
     // notifier would make the relay invoke itself on every turn, forever, and
     // uninstall would then "restore" a relay into a package that may be gone.
     text = replaceTopLevelLine(text, 'notify', notifyLine);
-  } else if (force) {
+  } else if (force || (compose && userScope && Array.isArray(tomlStringArray(existingNotify)))) {
     text = replaceTopLevelLine(text, 'notify', notifyLine);
     // Recorded so uninstall can put the user's own line back. Whether it may
     // also be *executed* is a separate question, answered in
@@ -1120,7 +1120,7 @@ function installCodex(paths, config, force, installIdentifier, userScope = false
     // Nothing was installed, so nothing is remembered. Recording the prior line
     // here used to hand a repo-supplied `notify` argv to spawn() on every later
     // turn, from an install this branch had just declined to perform.
-    record.warning = 'Codex notify is already configured; it was left unchanged. Use --force to replace it with Tokenwatch relay and restore it on uninstall.';
+    record.warning = 'Codex notify is already configured; it was left unchanged. Use --compose at user scope to record turns and forward notifications to the existing notifier, or --force to replace it and restore it on uninstall.';
     record.notifyLine = undefined;
   }
   if (config.codex.installOtelConfig) {
@@ -1512,7 +1512,7 @@ export function install(config, options = {}) {
     if (reinstalling('copilot')) {
       record.copilot = installCopilot(paths, Boolean(options.force), userScope, { mode: composeMode, explicitCompose, carry: carried.copilot?.entries ?? null, key, where });
     }
-    if (agents.includes('codex')) record.codex = installCodex(paths, config, Boolean(options.force), key, userScope);
+    if (agents.includes('codex')) record.codex = installCodex(paths, config, Boolean(options.force), key, userScope, explicitCompose);
     // The shared skills, once, when this run touched an agent that reads them
     // and one that is instrumented still does: Codex, or a Copilot whose
     // settings file was not refused. A retained Codex keeps its skills even
